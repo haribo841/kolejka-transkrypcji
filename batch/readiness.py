@@ -209,7 +209,7 @@ def check_destination(folder, reserve_gb=2):
         raise ValueError("Folder wyników nie jest dostępny: " + str(path))
     check_disk(parent, reserve_gb=reserve_gb)
     try:
-        with tempfile.TemporaryFile(dir=parent):
-            pass
+        with tempfile.TemporaryFile(dir=parent) as probe:
+            probe.write(b"write-access")
     except OSError as exc:
         raise OSError("Brak prawa zapisu do folderu wyników: " + str(path)) from exc

@@ -1,6 +1,8 @@
 # Walidacja samodzielnego checkoutu
 
-10.10.2026: przygotowano wspólną publikację czterech poprawek SonarCloud oraz zaakceptowanej rozbudowy UI. Przechodzi 161 testów bez pominięć, także z przypiętym FFmpeg 8.0.1 używanym w CI. Szczegóły i sposób niezależnej weryfikacji zdalnego wyniku: [raport napraw](SONAR-2026-10-10.md).
+11.10.2026: naprawiono siedem porównań oczekiwanych ścieżek przez `resolve()`, zachowując aliasy w danych wejściowych. Ponownie odtworzono pięć błędów poprzedniej publikacji przy `TEMP` i `TMP` wskazujących rzeczywisty alias Windows 8.3. Poprawiona pełna seria: 161 testów bez pominięć z FFmpeg 8.0.1. Przechodzą kompilacja, `pip check` i kontrola białych znaków. Przygotowano też poprawki pozostałych trzech S1192 i jednego S108. Wynik zdalnego CI i SonarCloud wymaga sprawdzenia po publikacji dla nowego SHA. Szczegóły: [raport napraw](SONAR-2026-10-10.md).
+
+10.10.2026: opublikowano `18f94c6960a2064d92fcdf70a5f6edca3fae0ddb` z czterema poprawkami SonarCloud i zaakceptowaną rozbudową UI. SonarCloud potwierdził zielony Quality Gate i niezawodność A. GitHub Actions wykazało pięć błędnych porównań aliasów ścieżek Windows w nowych testach. Poprawkę CI przygotowano lokalnie: odtworzono pięć niepowodzeń na aliasie 8.3, a po korekcie przechodziło 161 testów bez pominięć z FFmpeg 8.0.1. Tego dnia poprawka nie została opublikowana z powodu dziennego limitu.
 
 09.10.2026, usprawnienia UI: lokalnie wdrożono kartę Konfiguracja, nawigację, wybór miejsca wyników i kontrolę formatów. W repozytorium oraz instalacji przechodzą 157 testów bez pominięć. Oba MKV przeszły próby z UVR i bez niego; po wdrożeniu przeszła dodatkowa próba 60 sekund. Zachowano 5059 pozycji i zatrzymaną kolejkę. Zmiany nie zostały ponownie opublikowane. Szczegóły i granice walidacji: [raport UI](UI-2026-10-09.md).
 

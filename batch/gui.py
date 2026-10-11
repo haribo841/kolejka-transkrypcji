@@ -27,6 +27,8 @@ from .youtube_access import SessionError, error_message, preferences as youtube_
 
 
 MODEL_STATE_FILE = 'konfiguracja-modelu.json'
+SETTINGS_FILE = 'ustawienia.json'
+START_ERROR_FILE = 'ostatni-blad-start.json'
 AUDIO_TRACK_TITLE = 'Ścieżka audio'
 FONT_FAMILY = 'Segoe UI'
 
@@ -279,7 +281,7 @@ class QueueWindow:
             return
         self.config = settings(self.root)
         key = tuple(tuple(file_stamp(self.root / name)) for name in
-                    ("ustawienia.json", "pierwsza-proba.json", MODEL_STATE_FILE, "konfiguracja-uvr.json", "youtube-dostep.json"))
+                    (SETTINGS_FILE, "pierwsza-proba.json", MODEL_STATE_FILE, "konfiguracja-uvr.json", "youtube-dostep.json"))
         if not force and key == self.readiness_key and time.monotonic() - self.readiness_checked < 60:
             return
         self.readiness_busy = True
@@ -321,7 +323,7 @@ class QueueWindow:
             return False
         config = settings(self.root)
         config[key] = value
-        atomic_json(self.root / "ustawienia.json", config)
+        atomic_json(self.root / SETTINGS_FILE, config)
         self.config = config
         self.readiness_key = None
         self.request_readiness(force=True)
@@ -414,7 +416,7 @@ class QueueWindow:
             self.progress["value"] = job["progress"]
         else:
             message = control["message"] if scope != "local" else ""
-            failure = read_json(self.root / "ostatni-blad-start.json", {})
+            failure = read_json(self.root / START_ERROR_FILE, {})
             if not message and failure.get("kind") == "youtube":
                 message = failure.get("message", "")
             if "not a bot" in message.casefold() or "too many requests" in message.casefold():
@@ -564,7 +566,7 @@ class QueueWindow:
                 return
             check_destination(job_folder(self.root, pending[0]), self.config["min_free_gb"])
             launch(self.root, kind=kind, job_ids=job_ids)
-            atomic_json(self.root / "ostatni-blad-start.json", {"at": now(), "kind": kind, "message": ""})
+            atomic_json(self.root / START_ERROR_FILE, {"at": now(), "kind": kind, "message": ""})
         except Exception as exc:
             self.record_start_error(kind, str(exc))
             messagebox.showerror("Kolejka nie została uruchomiona", str(exc), parent=self.window)
@@ -572,7 +574,7 @@ class QueueWindow:
     def record_start_error(self, kind, message):
         from .hf_access import redact
         message = redact(message)[:2500]
-        atomic_json(self.root / "ostatni-blad-start.json", {"at": now(), "kind": kind, "message": message})
+        atomic_json(self.root / START_ERROR_FILE, {"at": now(), "kind": kind, "message": message})
         (self.local_tab.note if kind == "local" else self.source_note).set("Start przerwany: " + message)
 
     def start_in_progress(self):
@@ -706,7 +708,7 @@ class QueueWindow:
             self.keep_audio.set(True)
         self.config = settings(self.root)
         self.config.update(uvr_enabled=self.uvr_enabled.get(), keep_audio=self.keep_audio.get())
-        atomic_json(self.root / "ustawienia.json", self.config)
+        atomic_json(self.root / SETTINGS_FILE, self.config)
         self.readiness_key = None
         self.request_readiness(force=True)
 

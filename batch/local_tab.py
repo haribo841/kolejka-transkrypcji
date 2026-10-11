@@ -14,6 +14,8 @@ from .ui_help import (HELP, Tooltip, collapsible_help, duration_text, help_butto
 from .local_outputs import OUTPUT_MODES, scan_media
 from .readiness import readiness_summary
 
+ENABLED_STATE = "!disabled"
+
 
 def folder_media(folder, recursive=True, m4a_only=False, excluded=()):
     extensions = {".m4a"} if m4a_only else MEDIA
@@ -171,7 +173,7 @@ class LocalQueueTab:
     def update_output_controls(self):
         custom = self.output_mode.get() == OUTPUT_MODES["custom"]
         self.output_entry.configure(state="normal" if custom else "disabled")
-        self.output_browse.state(["!disabled"] if custom else ["disabled"])
+        self.output_browse.state([ENABLED_STATE] if custom else ["disabled"])
 
     def output_changed(self, event=None):
         self.update_output_controls()
@@ -283,8 +285,8 @@ class LocalQueueTab:
         scope = job["kind"] if job else control.get("scope_kind", "all")
         self.show_current(control, alive, job, scope)
         self.controls["start"].state(["disabled"] if alive or self.app.busy_import or self.app.metadata_busy or
-                                      not readiness_summary(self.app.readiness, "local")[0] else ["!disabled"])
-        self.controls["stop"].state(["!disabled"] if alive and scope == "local" else ["disabled"])
+                                      not readiness_summary(self.app.readiness, "local")[0] else [ENABLED_STATE])
+        self.controls["stop"].state([ENABLED_STATE] if alive and scope == "local" else ["disabled"])
 
     def show_current(self, control, alive, job, scope):
         if alive and scope == "local":

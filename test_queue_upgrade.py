@@ -50,12 +50,12 @@ class OutputPolicyTests(unittest.TestCase):
         current = Store(self.store.root).get(job["id"])
         self.assertIsNone(current.pop("output_root"))
         self.assertEqual(old, current)
-        self.assertEqual(job_folder(self.store.root, current), self.store.root / "wyniki" / current["folder"])
+        self.assertEqual(job_folder(self.store.root, current), (self.store.root / "wyniki" / current["folder"]).resolve())
 
     def test_new_destination_beside_source_and_duplicate_cannot_move_it(self):
         job = self.imported()
         destination = job_folder(self.store.root, job)
-        self.assertEqual(destination.parent, self.source)
+        self.assertEqual(destination.parent, self.source.resolve())
         self.store.update(job["id"], status="done", attempts=1)
         before = self.store.get(job["id"])
         self.imported("custom", str(self.base / "inne wyniki"))
@@ -64,10 +64,10 @@ class OutputPolicyTests(unittest.TestCase):
 
     def test_central_and_custom_destinations(self):
         job = self.imported("central")
-        self.assertEqual(job_folder(self.store.root, job).parent, self.store.root / "wyniki")
+        self.assertEqual(job_folder(self.store.root, job).parent, (self.store.root / "wyniki").resolve())
         self.store.change_output([job["id"]], "custom", self.base / "wspólne")
         changed = self.store.get(job["id"])
-        self.assertEqual(job_folder(self.store.root, changed).parent, self.base / "wspólne")
+        self.assertEqual(job_folder(self.store.root, changed).parent, (self.base / "wspólne").resolve())
         self.assertEqual(changed["status"], "pending")
 
     def test_change_is_atomic_when_one_selected_job_has_started(self):
@@ -105,7 +105,7 @@ class OutputPolicyTests(unittest.TestCase):
         legacy.mkdir()
         (legacy / "fragment.wav").write_bytes(b"work")
         found = scan_media(self.source, {".wav", ".flac"}, excluded=[legacy])
-        self.assertEqual(found, [self.recording])
+        self.assertEqual(found, [self.recording.resolve()])
         self.assertEqual(import_local(self.store, [self.source], output_mode="beside")["added"], 1)
         self.assertEqual(len(self.store.jobs()), 2)  # unregistered legacy folder remains user input
 
@@ -129,9 +129,9 @@ class ReadinessTests(unittest.TestCase):
             other = app / "inna baza"
             atomic_json(app / "lokalna-instalacja.json", {"root": str(local)})
             with patch.dict("os.environ", {"KOLEJKA_ROOT": ""}):
-                self.assertEqual(default_registry(app), local)
+                self.assertEqual(default_registry(app), local.resolve())
             with patch.dict("os.environ", {"KOLEJKA_ROOT": str(other)}):
-                self.assertEqual(default_registry(app), other)
+                self.assertEqual(default_registry(app), other.resolve())
 
     def test_duration_long_audio_and_unknown_values(self):
         for value, expected in ((4017.484, "01:06:57"), (3982.684, "01:06:23"),
