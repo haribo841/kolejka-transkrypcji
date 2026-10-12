@@ -36,7 +36,7 @@ class LocalQueueTab:
         self.search = tk.StringVar(master=parent)
         self.status = tk.StringVar(master=parent, value="Wszystkie")
         self.selected_only = tk.BooleanVar(master=parent, value=False)
-        self.note = tk.StringVar(master=parent, value="Dodaj audio lub wideo. Import nie uruchamia transkrypcji.")
+        self.note = tk.StringVar(master=parent, value="Dodaj folder... wybiera folder i dodaje jego nagrania do listy. Transkrypcję uruchamiasz osobno przyciskiem Start.")
         self.counts, self.current, self.detail = (tk.StringVar(master=parent) for _ in range(3))
         self.hint = tk.StringVar(master=parent, value="Start obejmuje tylko pliki lokalne. Miejsce wyników zapisujemy osobno dla każdego nagrania.")
         frame = ttk.Frame(parent, padding=12)
@@ -54,12 +54,14 @@ class LocalQueueTab:
         source.pack(fill="x")
         row = ttk.Frame(source)
         row.pack(fill="x")
-        ttk.Label(row, text="Folder:").pack(side="left", padx=(0, 8))
+        ttk.Label(row, text="Folder źródłowy:").pack(side="left", padx=(0, 8))
         entry = ttk.Entry(row, textvariable=self.folder)
         entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.help(entry, "folder_path", "Folder źródłowy. Wybór nie uruchamia importu ani transkrypcji.")
-        self.button(row, "browse", "Wybierz folder", self.choose_folder, "Wybiera folder źródłowy.").pack(side="left", padx=(0, 6))
-        self.button(row, "import_folder", "Dodaj folder", self.add_folder, HELP["folder"]).pack(side="left", padx=(0, 6))
+        entry.bind("<Return>", lambda event: self.add_folder())
+        self.help(entry, "folder_path", "Ścieżka folderu źródłowego. Wpisz lub wklej ścieżkę, potem kliknij Dodaj z podanej ścieżki albo naciśnij Enter.")
+        self.button(row, "browse", "Dodaj folder...", self.choose_and_import_folder, HELP["folder"]).pack(side="left", padx=(0, 6))
+        self.button(row, "import_folder", "Dodaj z podanej ścieżki", self.add_folder,
+                    "Dodaje nagrania z folderu wpisanego obok. Przy ponownym skanowaniu pomija materiały już w kolejce. Nie uruchamia transkrypcji.").pack(side="left", padx=(0, 6))
         self.button(row, "files", "Dodaj pliki", self.add_files, HELP["files"]).pack(side="left")
         row = ttk.Frame(source)
         row.pack(fill="x", pady=(5, 0))
@@ -209,6 +211,12 @@ class LocalQueueTab:
                     initialdir=initial if initial and Path(initial).is_dir() else None)
         if path:
             self.set_folder(path)
+            return True
+        return False
+
+    def choose_and_import_folder(self):
+        if self.choose_folder():
+            self.add_folder()
 
     def add_folder(self):
         value = self.folder.get().strip()
@@ -219,9 +227,10 @@ class LocalQueueTab:
             return
         recursive, m4a = self.recursive.get(), self.m4a_only.get()
         self.save_view()
-        self.note.set("Wyszukiwanie i identyfikacja nagrań...")
         excluded = [job_folder(self.app.root, job) for job in self.app.store.jobs()]
-        self.import_paths(lambda: folder_media(value, recursive, m4a, excluded))
+        scope = "tylko M4A" if m4a else "audio i wideo"
+        scope += ", z podfolderami" if recursive else ", bez podfolderów"
+        self.import_paths(lambda: folder_media(value, recursive, m4a, excluded), folder_scope=scope)
 
     def add_files(self):
         paths = filedialog.askopenfilenames(parent=self.app.window, title="Lokalne nagrania do transkrypcji",
@@ -229,20 +238,47 @@ class LocalQueueTab:
         if paths:
             self.import_paths(lambda: paths)
 
-    def import_paths(self, collect):
+    def import_paths(self, collect, folder_scope=None):
+        if self.app.busy_import:
+            messagebox.showinfo("Trwa import", "Poczekaj na zakończenie bieżącego importu.", parent=self.app.window)
+            return
         mode, custom = self.output_policy()
         if mode == "custom" and not custom:
             self.note.set("Wskaż folder wyników przed importem.")
             return
         self.save_view()
+        self.note.set("Wyszukiwanie i identyfikacja nagrań... Lista zostanie odświeżona po imporcie.")
         config = dict(self.app.config)
         def run():
             result = import_local(self.app.store, collect(), lambda value: self.app.events.put(("progress", value, self.note)),
                                   config=config, output_mode=mode, output_root=custom)
+            result["local_import"] = True
             result["note"] = (f"Znaleziono: {result['files']} | Dodano: {result['added']} | "
                               f"Kopie lub już w kolejce: {result['files'] - result['added']} | Błędy odczytu: {result['errors']}. Import zakończony.")
+            if not result["files"] and folder_scope:
+                result["note"] += (f" Nie znaleziono nagrań. Skanowanie: {folder_scope}. "
+                                   "Sprawdź folder oraz opcje Tylko M4A i Podfoldery. Własne katalogi wyników są pomijane.")
+            if result["files"]:
+                statuses = Counter(result["job_statuses"])
+                summary = ", ".join(f"{STATUSES[status]}: {count}" for status, count in sorted(statuses.items()))
+                result["note"] += f" Zaznaczone pozycje: {summary}. Start pozostaje ręczny."
+                if any(status in RETRYABLE for status in statuses):
+                    result["note"] += " Błędy ponawiasz przyciskiem Ponów nieudane; ponowny import nie resetuje postępu."
             return result
         self.app.background(run, note=self.note)
+
+    def import_finished(self, result):
+        """Show an import's committed jobs immediately on the Tk main thread."""
+        self.search.set("")
+        self.status.set("Wszystkie")
+        self.app.jobs = {job["id"]: job for job in self.app.store.jobs()}
+        self.render()
+        added = [str(ident) for ident in result.get("job_ids", []) if self.tree.exists(str(ident))]
+        if added:
+            self.tree.selection_set(added)
+            self.tree.focus(added[0])
+            self.tree.see(added[0])
+            self.show_detail()
 
     def selected(self):
         return [int(item) for item in self.tree.selection()]
@@ -287,6 +323,8 @@ class LocalQueueTab:
         self.controls["start"].state(["disabled"] if alive or self.app.busy_import or self.app.metadata_busy or
                                       not readiness_summary(self.app.readiness, "local")[0] else [ENABLED_STATE])
         self.controls["stop"].state([ENABLED_STATE] if alive and scope == "local" else ["disabled"])
+        for key in ("browse", "import_folder", "files"):
+            self.controls[key].state(["disabled"] if self.app.busy_import else [ENABLED_STATE])
 
     def show_current(self, control, alive, job, scope):
         if alive and scope == "local":

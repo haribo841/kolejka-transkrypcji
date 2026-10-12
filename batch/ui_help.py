@@ -200,7 +200,7 @@ def wrap_with_parent(label, padding):
 HELP = {
     "import": "Otwiera katalog Excel z arkuszem Materiały i dodaje linki YouTube. Powtórny import pomija duplikaty. Nie rozpoczyna pobierania.",
     "files": "Dodaje wybrane pliki audio lub wideo z dysku. Oryginały pozostają na miejscu. Po imporcie naciśnij Start.",
-    "folder": "Dodaje nagrania z folderu i wszystkich jego podfolderów. Porównuje zawartość plików, aby nie dublować pracy.",
+    "folder": "Otwiera wybór folderu i po zatwierdzeniu dodaje jego nagrania do listy. Opcje Podfoldery i Tylko M4A określają zakres skanowania. Porównuje zawartość, aby nie dublować pracy. Transkrypcję uruchamiasz osobno przyciskiem Start.",
     "speakers": "Otwiera przewodnik: bezpośrednia strona Community-1, token Hugging Face, sprawdzenie dostępu i pobranie. Konfiguracja jest jednorazowa.",
     "test": "Sprawdza do 60 sekund wybranego nagrania z aktualnymi opcjami UVR i mówców. Długiego pliku nie trzeba ciąć. Próba nie uruchamia produkcyjnej kolejki.",
     "next": "Przewija listę do bieżącego nagrania albo pierwszego włączonego zadania oczekującego. Nie rozpoczyna pracy.",

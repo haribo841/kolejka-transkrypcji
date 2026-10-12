@@ -24,6 +24,8 @@ from .processes import ChildGuard
 UVR_STATE_FILE = 'konfiguracja-uvr.json'
 
 UVR_RATE = 44100
+MODEL_ROUNDING_SECONDS = .05
+CONTAINER_TAIL_SECONDS = .25
 
 
 def emit(message, percent=0):
@@ -124,18 +126,36 @@ def separate_vocal(engine, config, stage, source):
     return engine, generated_vocal(stage, filenames[0])
 
 
-def write_vocal_block(generated, stem, block):
+def vocal_padding(samples, rate, required, prepared, final):
+    """Distinguish missing model output from an audio track ending before video."""
+    import soundfile as sf
+    tolerance = round(rate * MODEL_ROUNDING_SECONDS)
+    source_tail = 0
+    if prepared is not None:
+        original = sf.info(prepared)
+        if original.samplerate != rate or original.channels != 2 or not original.frames:
+            raise RuntimeError("Niepoprawne wejście bloku UVR.")
+        if original.frames - len(samples) > tolerance:
+            raise RuntimeError("UVR skrócił nagranie; nie można zachować timestampów.")
+        source_tail = max(0, required - original.frames)
+        if source_tail > tolerance and (not final or source_tail > round(rate * CONTAINER_TAIL_SECONDS)):
+            raise RuntimeError("Ścieżka audio jest krótsza od planu bloku UVR. Sprawdź wybraną ścieżkę audio.")
+    deficit = max(0, required - len(samples))
+    if deficit > tolerance + source_tail:
+        raise RuntimeError("UVR skrócił nagranie; nie można zachować timestampów.")
+    return deficit
+
+
+def write_vocal_block(generated, stem, block, *, prepared=None, final=False):
     import numpy as np
     import soundfile as sf
     samples, rate = sf.read(generated, dtype="float32", always_2d=True)
-    if rate != UVR_RATE or not np.isfinite(samples).all():
+    if rate != UVR_RATE or samples.shape[1] != 2 or not np.isfinite(samples).all():
         raise RuntimeError("UVR zwrócił niepoprawne audio.")
     left = round(block["core_start"] * rate) - round(block["start"] * rate)
     expected = round(block["core_end"] * rate) - round(block["core_start"] * rate)
-    if len(samples) < left + expected:
-        deficit = left + expected - len(samples)
-        if deficit > rate * .05:
-            raise RuntimeError("UVR skrócił nagranie; nie można zachować timestampów.")
+    deficit = vocal_padding(samples, rate, left + expected, prepared, final)
+    if deficit:
         samples = np.pad(samples, ((0, deficit), (0, 0)))
     temporary = output_file(stem.with_suffix(".partial"))
     sf.write(temporary, samples[left:left + expected], rate, format="FLAC", subtype="PCM_24")
@@ -161,6 +181,7 @@ def join_vocal_blocks(output, jobs, block_dir, duration):
 
 
 def run(request):
+    import soundfile as sf
     config = request["config"]
     source, work, output = request_paths(request)
     duration = float(probe(source, config)["format"]["duration"])
@@ -191,9 +212,13 @@ def run(request):
         # Cut context only, no silence removal or time stretching. Sample indexes
         # are computed from absolute boundaries to prevent accumulated drift.
         engine, generated = separate_vocal(engine, config, stage, prepared)
-        expected = write_vocal_block(generated, stem, block)
+        expected = write_vocal_block(generated, stem, block, prepared=prepared, final=index == len(jobs) - 1)
+        prepared_frames, vocal_frames = sf.info(prepared).frames, sf.info(generated).frames
+        required = round(block["core_end"] * UVR_RATE) - round(block["start"] * UVR_RATE)
         saved = {"signature": key, "block": block, "frames": expected, "sha256": digest(stem),
-                 "device": str(engine.torch_device), "seconds": time.perf_counter() - started}
+                 "device": str(engine.torch_device), "seconds": time.perf_counter() - started,
+                 "prepared_frames": prepared_frames, "vocal_frames": vocal_frames,
+                 "tail_padding_frames": max(0, required - vocal_frames)}
         checkpoint(manifest_path, saved)
         parts.append(saved)
         remove_work_file(prepared, work)

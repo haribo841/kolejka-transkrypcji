@@ -72,7 +72,7 @@ class QueueWindow:
         Tooltip(self.notebook, "YouTube i pliki lokalne mają oddzielne listy. Konfiguracja jest wspólna.", self.help_status, popup=False)
         self.build_youtube()
         self.local_tab = LocalQueueTab(self, self.local_page)
-        self.controls["files"], self.controls["folder"] = self.local_tab.controls["files"], self.local_tab.controls["import_folder"]
+        self.controls["files"], self.controls["folder"] = self.local_tab.controls["files"], self.local_tab.controls["browse"]
         self.transcript_tab = TranscriptTab(self, self.processing_page)
         from .config_tab import ConfigurationTab
         self.config_tab = ConfigurationTab(self, self.config_page)
@@ -495,6 +495,8 @@ class QueueWindow:
             note.set(str(value))
         elif isinstance(value, dict):
             note.set(value.get("note") or f"Import: dodano {value.get('added', 0)}, znaleziono {value.get('files', value.get('rows', 0))}.")
+            if value.get("local_import"):
+                self.local_tab.import_finished(value)
         else:
             note.set(str(value))
 
@@ -510,7 +512,7 @@ class QueueWindow:
 
     def add_folder(self):
         self.notebook.select(self.local_page)
-        self.local_tab.choose_folder()
+        self.local_tab.choose_and_import_folder()
 
     def enable(self, enabled, ids=None):
         self.store.configure(self.selected() if ids is None else ids, enabled=int(enabled))
@@ -797,7 +799,7 @@ class QueueWindow:
         content.insert("end", "Obróbka transkrypcji\n", "heading")
         content.insert("end", "Karta Obróbka transkrypcji usuwa etykiety mówców z gotowych TXT, SRT i VTT. Dodaj pliki lub wybierz Wszystkie gotowe, sprawdź podgląd i zapisz kopie. Timestampy oraz wypowiedzi pozostają bez zmian. Domyślny folder kopii to obrobione; oryginały pozostają zachowane.\n")
         content.insert("end", "Kolejka lokalna\n", "heading")
-        content.insert("end", "Wybierz folder, ustaw podfoldery lub tylko M4A i kliknij Dodaj folder do kolejki. Import porównuje SHA-256, pomija identyczne kopie i nie uruchamia obliczeń. Start/Wznów lokalne obejmuje tylko pliki lokalne, nigdy katalog YouTube. Opcja Start tylko zaznaczonych ogranicza sesję bez wyłączania innych materiałów. Jeden wykonawca obsługuje jedną sesję; aby zmienić kolejkę, dokończ bieżące nagranie i zatrzymaj. Wyniki i punkty wznowienia pozostają w tej samej bazie.\n")
+        content.insert("end", "Dodaj folder... otwiera wybór folderu i od razu importuje znalezione nagrania. Możesz też wkleić ścieżkę i kliknąć Dodaj z podanej ścieżki. Opcje Podfoldery i Tylko M4A określają zakres skanowania. Po imporcie lista pokazuje i zaznacza znalezione pozycje, także już obecne; komunikat podaje liczbę nowych nagrań i duplikatów. Ponowny import nie resetuje postępu. Materiały z błędem przywracasz przyciskiem Ponów nieudane. Start/Wznów lokalne obejmuje tylko pliki lokalne. Opcja Start tylko zaznaczonych ogranicza sesję bez wyłączania innych materiałów. Jeden wykonawca obsługuje jedną sesję; aby zmienić kolejkę, dokończ bieżące nagranie i zatrzymaj.\n")
         content.configure(state="disabled")
         Tooltip(content, "Przewijaj kółkiem myszy lub klawiszami Page Up / Page Down. Tekst możesz zaznaczyć i skopiować.", popup=False)
         help_button(frame, "Zamknij pomoc", dialog.destroy, "Wraca do kolejki bez zmiany jej stanu.").pack(anchor="e", pady=(10, 0))

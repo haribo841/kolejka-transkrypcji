@@ -171,13 +171,17 @@ def import_local(store, paths, progress=lambda message: None, *, config=None, ou
             files.update(scan_media(path, MEDIA, excluded=excluded))
         elif path.suffix.lower() in MEDIA or config is not None:
             files.add(path)
-    count, errors = 0, 0
+    count, errors, found = 0, 0, {}
     for index, path in enumerate(sorted(files), 1):
         progress(f"Identyfikacja plików: {index}/{len(files)}: {path.name}")
         entry = local_entry(store, path, config, output_mode, output_root)
         errors += bool(entry["error"])
         count += store.add_many([entry])
-    return {"files": len(files), "added": count, "errors": errors}
+        with store.connect() as db:
+            for job in db.execute("SELECT id,status FROM jobs WHERE identity=?", (entry["identity"],)):
+                found[job["id"]] = job["status"]
+    return {"files": len(files), "added": count, "errors": errors,
+            "job_ids": list(found), "job_statuses": list(found.values())}
 
 
 def enrich_local(store, jobs, config):

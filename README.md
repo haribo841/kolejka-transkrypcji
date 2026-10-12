@@ -1,96 +1,122 @@
-# Kolejka transkrypcji
+# Transcription Queue
 
-Aplikacja Windows napisana w Pythonie, z oknem Tkinter/ttk. Przetwarza kolejkę filmów YouTube oraz lokalnych nagrań audio i wideo: pobiera audio, opcjonalnie wydziela wokal, transkrybuje lokalnie przez Whisper/OpenVINO i rozróżnia mówców. Postęp zapisuje w SQLite, a ukończone wyniki w TXT, SRT, VTT i JSON.
+A Windows desktop application built with Python and Tkinter/ttk for processing YouTube videos and local audio or video recordings. It downloads audio, optionally separates vocals, transcribes speech locally with Whisper/OpenVINO, and identifies speakers. SQLite stores queue progress; completed recordings are exported to TXT, SRT, VTT, and JSON.
 
-[Instrukcja obsługi](KOLEJKA.md) | [Walidacja](docs/WERYFIKACJA.md) | [Migracja repozytorium](docs/MIGRACJA.md) | [Licencja MIT](LICENSE)
+[User guide (Polish)](KOLEJKA.md) | [Validation notes (Polish)](docs/WERYFIKACJA.md) | [Repository migration (Polish)](docs/MIGRACJA.md) | [MIT license](LICENSE)
 
-## Funkcje
+## Features
 
-- Import katalogu YouTube z XLSX, plików lokalnych i folderów z podfolderami. Ponowny import pomija duplikaty i zachowuje ukończone pozycje.
-- Osobne karty Kolejka YouTube i Kolejka lokalna. Start w karcie obejmuje tylko jej nagrania; opcja zaznaczonych ogranicza sesję bez wyłączania innych pozycji.
-- Nawigacja do bieżącego lub pierwszego oczekującego nagrania, czas trwania oraz zachowanie przewijania i zaznaczenia przy odświeżaniu.
-- Karta Konfiguracja z kontrolą plików i środowisk w tle oraz datowaną próbą do 60 sekund, uwzględniającą aktualne opcje UVR i mówców.
-- Wybór miejsca wyników lokalnych: własny podfolder obok źródła, folder centralny lub wskazany folder. Istniejące zadania zachowują swoje miejsca.
-- Jeden materiał naraz, kolejność chronologiczna, filtry, wybór języka i ścieżki audio.
-- Start/Wznów oraz Dokończ bieżący i zatrzymaj. Zamknięcie okna pozostawia wykonawcę w tle; aplikację można ponownie otworzyć.
-- Punkty wznowienia transkrypcji, diarizacji i UVR. Po awarii ukończone bloki są sprawdzane i wykorzystywane ponownie.
-- Whisper large-v3-turbo przez OpenVINO GenAI na CPU, czasy słów, pyannote Community-1 i opcjonalny UVR przez audio-separator.
-- Opcjonalne zachowanie źródłowego audio i wydzielonego wokalu. Oryginalne pliki lokalne pozostają na miejscu.
-- Nazwy wyników zawierające identyfikator nagrania, zapis atomowy i wersjonowanie przy zajętej nazwie.
-- Karta Obróbka transkrypcji tworząca kopie TXT/SRT/VTT bez etykiet mówców, z zachowanymi czasami i wypowiedziami.
-- Podpowiedzi przycisków, eksport raportu CSV i konfiguracja opcjonalnej sesji YouTube z testem jednego linku.
+- Import a YouTube catalog from XLSX, individual local files, or folders with subfolders. Repeated imports recognize duplicate content and preserve progress.
+- Separate YouTube and local queue tabs. Each tab starts only its own recordings; an optional selection filter limits a session without disabling other jobs.
+- Jump to the current recording or the first enabled pending job. Lists show duration and retain scrolling and selection during refreshes.
+- A configuration tab with background checks and a dated sample test of up to 60 seconds using the current vocal separation and speaker settings.
+- Choose where local results are saved: a dedicated subfolder beside the source, the central results directory, or a custom directory. Existing jobs retain their destinations.
+- Process one recording at a time, in chronological order, with search, filters, language overrides, and audio track selection.
+- Start or resume a session, or finish the current recording and then stop. The worker continues when the window closes; reopening the application reconnects to the queue.
+- Resume transcription, speaker diarization, and vocal separation from verified checkpoints after an interruption.
+- Whisper large-v3-turbo through OpenVINO GenAI on CPU, word timestamps, pyannote Community-1 for speaker diarization, and optional Universal Vocal Remover (UVR) through audio-separator.
+- Optionally retain source audio and the separated vocal track. Original local files remain untouched.
+- Unique output names based on the recording ID, atomic writes, and versioned exports when an output name is already occupied.
+- A transcript editing tab that creates TXT/SRT/VTT copies without speaker labels, preserving timestamps and spoken text.
+- Delayed tooltips, CSV progress reports, and optional YouTube session settings with a test of one video link.
 
-Repozytorium zawiera kod i przypięte listy zależności. Modele, środowiska Python, prywatne katalogi filmów, pliki cookies, tokeny i wyniki przetwarzania przygotowuje się lokalnie. Transkrypcja działa bez sterowania oknem Audacity.
+This repository contains application code and pinned dependency files. Models, Python environments, private video catalogs, cookies, tokens, and processing results are kept locally. Transcription runs directly through OpenVINO and does not require Audacity.
 
-## Wymagania
+## Requirements
 
-- Windows 10/11, Python 3.13 dla głównego środowiska oraz Python 3.12 dla mówców i opcjonalnego UVR. Instalatory korzystają z launchera `py`; można podać własne ścieżki do interpreterów.
-- FFmpeg i FFprobe 9 oraz Node.js 22 dostępne w `PATH` albo wskazane pełnymi ścieżkami w ustawieniach.
-- Miejsce na modele oraz audio robocze. Mono PCM 16 kHz zajmuje około 64 kB na sekundę; pozostaw dodatkowe miejsce na UVR i zachowywane nagrania.
-- Internet do jednorazowego pobrania wag i do materiałów YouTube. Community-1 wymaga zaakceptowania warunków modelu oraz tokenu Hugging Face z uprawnieniami Read.
+- Windows 10 or 11, Python 3.13 for the main environment, and Python 3.12 for speaker diarization and optional UVR. Installers use the `py` launcher or explicitly supplied interpreter paths.
+- FFmpeg and FFprobe 9, plus Node.js 22, available on `PATH` or configured by their full paths. The Windows CI workflow uses FFmpeg 8.0.1.
+- Disk space for models, temporary audio, and any retained recordings. Mono float32 PCM at 16 kHz uses approximately 64 kB per second; vocal separation needs additional space.
+- Internet access for the initial model downloads and for YouTube recordings. Community-1 requires accepting the model's access conditions and a Hugging Face token with Read permissions.
 
-Whisper domyślnie działa na CPU. Osobne środowiska mówców/UVR mają PyTorch CUDA 12.6. Dostępność GPU jest sprawdzana podczas obliczeń; nieudane wykonanie przechodzi na CPU z komunikatem. Wykrycie urządzenia nie gwarantuje zgodności wszystkich modeli i sterowników.
+Whisper uses CPU by default. The separate diarization and UVR environments use PyTorch with CUDA 12.6. These stages check GPU execution and fall back to CPU with a message if GPU processing fails. Detecting a device does not guarantee that every model and driver combination can use it.
 
-## Instalacja i pierwsza próba
+## Installation and first test
 
-W PowerShell otwórz folder sklonowanego repozytorium:
+Open PowerShell in the cloned repository:
 
 ```powershell
 .\Instaluj-zaleznosci.ps1
 .\.venv\Scripts\python.exe transcribe.py download
-# Opcjonalna separacja wokalu:
+# Optional vocal separation:
 .\Instaluj-UVR.ps1
 .\Uruchom-kolejke.vbs
 ```
 
-Instalatory nie podnoszą wersji bibliotek ponad pliki `requirements-*.lock.txt`. Wariant z własnymi interpreterami:
+The installers use the versions in `requirements-*.lock.txt`. To supply your own Python interpreters:
 
 ```powershell
 .\Instaluj-zaleznosci.ps1 -AsrInterpreter 'C:\Python313\python.exe' -DiarizationInterpreter 'C:\Python312\python.exe'
 .\Instaluj-UVR.ps1 -Interpreter 'C:\Python312\python.exe'
 ```
 
-W karcie Konfiguracja wybierz Konfiguracja Community-1, zaakceptuj dostęp do [Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1), sprawdź token Read i pobierz model. Ustaw UVR oraz mówców, a następnie kliknij Sprawdź na fragmencie. Możesz wskazać długie nagranie; program przetworzy do 60 sekund. Sprawdź tekst i etykiety mówców przed dużą sesją. Import nie rozpoczyna pracy; kolejkę uruchamia przycisk Start/Wznów.
+In the configuration tab, open the Community-1 setup, accept the access conditions on the [model page](https://huggingface.co/pyannote/speaker-diarization-community-1), verify your Read token, and download the model. Enable or disable vocal separation and speaker diarization, then run a sample test. You can select a long recording; the test processes up to 60 seconds. Review the transcript and speaker labels before starting a large session. Importing recordings never starts processing automatically.
 
-Domyślny folder danych to `%USERPROFILE%\Transkrypcje`, poza repozytorium. Inny folder wybiera się przez `KOLEJKA_ROOT` przed uruchomieniem albo parametr `--root`:
+The interface is currently in Polish. These are the main controls:
+
+| Action | Label in the application |
+| --- | --- |
+| Open configuration | Konfiguracja |
+| Set up speaker diarization | Konfiguracja Community-1 |
+| Test a recording sample | Sprawdź na fragmencie |
+| Select a folder and import its recordings | Dodaj folder... |
+| Import from the entered folder path | Dodaj z podanej ścieżki |
+| Start or resume the YouTube queue | Start/Wznów |
+| Start or resume the local queue | Start/Wznów lokalne |
+| Finish the current recording, then stop | Dokończ bieżący i zatrzymaj |
+| Retry failed jobs | Ponów nieudane |
+| Process selected jobs only | Start tylko zaznaczonych |
+| Configure YouTube access | Dostęp YouTube |
+
+## Data directory
+
+The default data directory is `%USERPROFILE%\Transkrypcje`, outside the repository. Set `KOLEJKA_ROOT` before launching the application, or pass `--root` to use another directory:
 
 ```powershell
-.\.venv\Scripts\python.exe kolejka.py --root 'D:\Transkrypcje' gui
-.\.venv\Scripts\python.exe kolejka.py --root 'D:\Transkrypcje' status
+.\.venv\Scripts\python.exe kolejka.py --root 'D:\Transcriptions' gui
+.\.venv\Scripts\python.exe kolejka.py --root 'D:\Transcriptions' status
 ```
 
-Nie ma automatycznego przenoszenia wcześniejszej bazy ani gotowych wyników. Istniejący folder danych można wskazać świadomie po sprawdzeniu ścieżek modeli i narzędzi w jego `ustawienia.json`. Jedna baza dopuszcza jednego wykonawcę. Aktualizowana instalacja może zapamiętać dotychczasową bazę w lokalnym, ignorowanym przez Git pliku `lokalna-instalacja.json` z polem `root`. Parametr `--root` i zmienna `KOLEJKA_ROOT` mają pierwszeństwo.
+Existing databases and results are not moved automatically. To reuse a data directory, check the model and tool paths in its `ustawienia.json` first. Each database allows one worker at a time. An existing installation can remember its data directory in the local, Git-ignored `lokalna-instalacja.json` file using the `root` field. The `--root` argument and `KOLEJKA_ROOT` environment variable take precedence.
 
-## Kolejka lokalna
+## Local recordings
 
-W karcie **Kolejka lokalna** wybierz folder i kliknij **Dodaj folder**, albo dodaj pojedyncze pliki. Skrót **Uruchom-kolejke-lokalna.vbs** otwiera tę kartę z ostatnio wybranym folderem. Możesz uwzględnić podfoldery lub ograniczyć import do M4A. Lista, liczniki, raport CSV i ponawianie błędów obejmują wyłącznie lokalne nagrania. Kopie o tym samym SHA-256 zajmują jedną pozycję w kolejce; oryginały i istniejące transkrypcje pozostają na miejscu.
+The folder picker imports recordings as soon as you confirm the selected folder. To scan a pasted or saved path, use the adjacent import button or press Enter in the path field. You can also add individual files. `Uruchom-kolejke-lokalna.vbs` opens the local queue with the last selected folder.
 
-Przed importem wybierz miejsce wyników. Domyślnie nowy plik dostaje osobny podfolder obok źródła, z krótkim tytułem i stabilnym ID. Dla zaznaczonych, nierozpoczętych zadań służy **Zmień miejsce wyników**. Nie przenosi gotowych ani częściowych wyników. FFmpeg obsługuje audio i wideo, w tym WAV, MP3, M4A/AAC, FLAC, OGG/Opus, MKV, MP4, WebM, MOV i AVI; pliki bez audio lub uszkodzone dostają osobny komunikat.
+The subfolder and M4A-only options determine which files are included. After import, the list immediately shows and selects the matching jobs, including existing ones. The summary reports new jobs, duplicates, their statuses, and any read errors. An empty scan shows an explicit message. Files with the same SHA-256 share one queue entry, even if their names differ. Reimporting does not reset completed work or failed jobs; use the retry control for failures, then start the queue manually.
 
-**Start/Wznów lokalne** nie uruchamia materiałów YouTube. Gdy trwa inna sesja, dokończ jej bieżące nagranie i zatrzymaj ją przed przełączeniem. Wznowienie wykorzystuje te same punkty kontrolne i wyniki, a zamknięcie okna nie przerywa wykonawcy. Opcje UVR i zachowywania audio są wspólne dla obu kolejek. Przykład otwarcia karty z wybranym folderem, bez importu lub automatycznego Start:
+See the [folder import and UVR timing fixes (Polish)](docs/NAPRAWA-2026-10-11.md) for the regression cases and local validation.
+
+Choose an output destination before importing. By default, each new recording receives a separate subfolder beside its source, with a short title and stable ID. You can change the destination of selected jobs that have not started. Completed or partially processed results are not moved. FFmpeg handles audio and video, including WAV, MP3, M4A/AAC, FLAC, OGG/Opus, MKV, MP4, WebM, MOV, and AVI. Files without audio, damaged files, and decoding failures receive a specific error.
+
+Starting the local queue does not start YouTube jobs. If another session is active, finish its current recording and stop it before switching queues. Resuming reuses the existing checkpoints and results; closing the window leaves the worker running. Vocal separation and audio retention settings are shared by both queues.
+
+To open the local tab with a chosen folder, without importing or starting processing:
 
 ```powershell
-.\.venv\Scripts\python.exe kolejka.py gui --local-folder 'D:\Nagrania'
+.\.venv\Scripts\python.exe kolejka.py gui --local-folder 'D:\Recordings'
 ```
 
-## YouTube i wyniki
+## YouTube access and outputs
 
-Pobieranie domyślnie działa anonimowo. Gdy YouTube żąda potwierdzenia, Dostęp YouTube pozwala otworzyć link w przeglądarce, wybrać sesję Firefoksa/Chrome/Edge lub lokalny plik Netscape `cookies.txt` i przetestować jeden film. Logowanie wykonuje użytkownik w przeglądarce. Sesja nie gwarantuje usunięcia ograniczenia konta lub adresu IP. [Dokumentacja yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
+Downloads are anonymous by default. If YouTube requests confirmation, the access dialog can open the video in a browser, use a Firefox/Chrome/Edge session or a local Netscape-format `cookies.txt` file, and test one link. Sign in through your browser. A session does not guarantee that account or IP restrictions will be lifted. See the [yt-dlp documentation](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
 
-Każde nagranie otrzymuje osobny katalog i nazwy z ID YouTube lub skrótem pliku lokalnego. Stan Gotowe jest nadawany po sprawdzeniu kompletu zapisanych wyników. Rozpoznany tekst, język i mówcy wymagają oceny użytkownika; muzyka, nakładanie głosów i przejścia między blokami mogą powodować błędy.
+Each recording has its own directory, with output filenames containing its YouTube ID or local content hash. A job is marked complete only after the full set of exports has been written and verified. Review the recognized text, language, and speaker labels: music, overlapping voices, and block boundaries can cause recognition errors.
 
-Lokalne etapy ASR, mówców i UVR nie wysyłają audio do chmury. Cookies oraz token Hugging Face nie powinny trafiać do repozytorium. Wagi modeli i biblioteki mają własne licencje i warunki dostępu.
+The transcription, diarization, and vocal separation stages process audio locally. Keep cookies and Hugging Face tokens out of the repository. Model weights and third-party libraries have their own licenses and access conditions.
 
-## Testy i pojedyncza transkrypcja
+## Tests and single-file transcription
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -v
-.\.venv\Scripts\python.exe transcribe.py transcribe 'D:\Nagrania\wyklad.mp4' --language auto --word-timestamps
+.\.venv\Scripts\python.exe transcribe.py transcribe 'D:\Recordings\lecture.mp4' --language auto --word-timestamps
 .\.venv\Scripts\python.exe transcribe.py transcribe --help
 ```
 
-Testy używają danych syntetycznych i katalogów tymczasowych. Pobieranie YouTube, model ASR i model mówców są zastępowane kontrolowanymi atrapami; próby FFmpeg używają syntetycznego audio i są pomijane, gdy narzędzia nie są zainstalowane. CI na Windows instaluje główny lockfile i FFmpeg 8.0.1 oraz uruchamia tę samą serię offline. Lokalna instalacja z FFmpeg 9 zachowuje swoją wersję. Dłuższe testy infrastruktury wymagają jawnego wskazania lokalnego modelu oraz własnej próbki i są opisane w [walidacji](docs/WERYFIKACJA.md).
+The test suite uses synthetic data and temporary directories. YouTube downloads and neural model calls are replaced with controlled test doubles. FFmpeg integration tests use generated audio and video; these tests are skipped if the tools are unavailable. Windows CI installs the pinned application and test dependencies plus FFmpeg 8.0.1, then runs the same offline suite. Local installations using FFmpeg 9 keep their version. Tests with real model weights and recordings are separate from the offline suite and are documented in the [validation notes](docs/WERYFIKACJA.md).
 
-## Historia
+## Repository history
 
-Dawne ćwiczenie ASP.NET Core XML CRUD jest zachowane w [historii Git](https://github.com/haribo841/kolejka-transkrypcji/tree/0b078d310db7922928e4ffe67f9c6121dd16570b). Jego migrację opublikowano 07.10.2026 w [Evaluation-tasks/Evaluation-task1](https://github.com/haribo841/Evaluation-tasks/tree/025cbdcd308ebb929f53b4b5244f830eec096038/Evaluation-task1), obok zadań 2 i 3. Archiwum zawiera [README dawnego CRUD](docs/archive/README-aspnetcore-xml-crud-2026-10-06.md) oraz [README Kolejki sprzed dodania karty lokalnej](docs/archive/README-kolejka-2026-10-08.md). Szczegóły przenoszenia znajdują się w [opisie migracji](docs/MIGRACJA.md).
+The former ASP.NET Core XML CRUD exercise remains available in [Git history](https://github.com/haribo841/kolejka-transkrypcji/tree/0b078d310db7922928e4ffe67f9c6121dd16570b). Its migration was published on 7 October 2026 in [Evaluation-tasks/Evaluation-task1](https://github.com/haribo841/Evaluation-tasks/tree/025cbdcd308ebb929f53b4b5244f830eec096038/Evaluation-task1), alongside tasks 2 and 3.
+
+The archive includes the [original CRUD README](docs/archive/README-aspnetcore-xml-crud-2026-10-06.md), the [queue README before the local tab](docs/archive/README-kolejka-2026-10-08.md), and the [README before this English rewrite](docs/archive/README-kolejka-2026-10-11.md). See the [migration notes](docs/MIGRACJA.md) for details.
