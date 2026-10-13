@@ -24,6 +24,7 @@ from .readiness import (ACTION, collect_readiness, file_stamp, readiness_summary
 from .worker import launch, preflight
 from .store import now
 from .youtube_access import SessionError, error_message, preferences as youtube_preferences
+from .session_button import SessionButton
 
 
 MODEL_STATE_FILE = 'konfiguracja-modelu.json'
@@ -47,6 +48,8 @@ class QueueWindow:
         self.session_view = read_json(self.root / "okno-ui.json", {})
         self.selection_queue = self.session_view.get("queue", "youtube")
         self.busy_import = self.readiness_busy = self.metadata_busy = self.closing = False
+        self.start_pending = self.launch_kind = self.launch_process = None
+        self.launch_deadline = 0
         self.pending_filter = self.refresh_after = self.events_after = self.navigation_after = None
         self.setup_dialog = self.youtube_dialog = self.guide_dialog = None
         self.readiness, self.readiness_key = {}, None
@@ -192,7 +195,8 @@ class QueueWindow:
         Tooltip(widget, HELP[key], self.help_status)
 
     def button(self, parent, key, label, action):
-        button = help_button(parent, label, action, HELP[key], self.help_status)
+        factory = SessionButton if key == "start" else help_button
+        button = factory(parent, label, action, HELP[key], self.help_status)
         self.controls[key] = button
         return button
 
@@ -285,7 +289,6 @@ class QueueWindow:
         if not force and key == self.readiness_key and time.monotonic() - self.readiness_checked < 60:
             return
         self.readiness_busy = True
-        self.readiness = {}
         self.readiness_key = key
         self.readiness_checked = time.monotonic()
         config = dict(self.config)
@@ -392,8 +395,8 @@ class QueueWindow:
         self.refresh_models()
         self.render_list()
         self.local_tab.refresh(control, alive)
-        self.controls["start"].state(["disabled"] if alive or self.busy_import or not readiness_summary(self.readiness, "youtube")[0] else ["!disabled"])
-        self.controls["stop"].state(["!disabled"] if alive and scope != "local" else ["disabled"])
+        self.update_session_controls(control, alive)
+        self.controls["stop"].state(["!disabled"] if alive and control["state"] == "running" and scope != "local" else ["disabled"])
         self.enrich_metadata()
         self.schedule_navigation()
         self.refresh_after = self.window.after(1200, self.refresh)
@@ -405,6 +408,24 @@ class QueueWindow:
         if alive:
             return "Przygotowanie pracy..."
         return "Kolejka zatrzymana. "
+
+    def update_session_controls(self, control=None, alive=None):
+        control = control or self.store.control()
+        alive = WorkerLock.busy(self.root) if alive is None else alive
+        scope = control.get("scope_kind", "all")
+        active = alive and control["state"] == "running"
+        waiting = self.launch_process is not None and self.launch_process.poll() is None and time.monotonic() < self.launch_deadline
+        if active or not waiting:
+            self.launch_kind = self.launch_process = None
+            waiting = False
+        for kind, button in (("youtube", self.controls["start"]), ("local", self.local_tab.controls["start"])):
+            starting = self.start_pending == kind or (waiting and not active and self.launch_kind == kind)
+            running = active and scope in {kind, "all"}
+            pending = any(job["kind"] == kind and job["enabled"] and
+                          (job["status"] in {"pending", "blocked", "running"} or
+                           (job["status"] == "error" and job["stage"] == "Wymaga działania")) for job in self.jobs.values())
+            button.show_session(active=running, starting=starting, stopping=running and bool(control["stop"]),
+                                enabled=pending and not alive and not self.busy_import and not self.start_pending and not waiting)
 
     def show_current(self, control, alive, job, scope):
         if alive and scope == "local":
@@ -427,7 +448,8 @@ class QueueWindow:
     def refresh_models(self):
         try:
             access = youtube_preferences(self.root)
-            mode = {"anonymous": "anonimowo", "browser": "sesja " + access["browser"], "file": "plik cookies"}[access["mode"]]
+            mode = {"anonymous": "anonimowo", "browser": "sesja " + access["browser"],
+                    "managed": "własne okno " + access["browser"], "file": "plik cookies"}[access["mode"]]
             self.youtube_state.set(f"YouTube: {mode} | przerwa przed filmem: {access['delay_seconds']:g} s | przy blokadzie otwórz Dostęp YouTube")
         except (SessionError, OSError):
             self.youtube_state.set("Sprawdź ustawienia w Dostęp YouTube.")
@@ -478,6 +500,7 @@ class QueueWindow:
     def handle_event(self, kind, value, note):
         if kind == "finished":
             self.busy_import = False
+            self.update_session_controls()
         elif kind == "readiness":
             self.readiness_busy = False
             config, result = value
@@ -551,6 +574,9 @@ class QueueWindow:
     def start(self, kind="youtube", job_ids=None):
         if self.start_in_progress():
             return
+        self.start_pending = kind
+        self.update_session_controls()
+        self.window.update_idletasks()
         try:
             if not self.ready_to_start(kind):
                 return
@@ -567,11 +593,15 @@ class QueueWindow:
                 messagebox.showinfo("Kolejka", "Nie ma włączonych nagrań oczekujących w tym zakresie. Nieudane możesz ponowić odpowiednim przyciskiem.", parent=self.window)
                 return
             check_destination(job_folder(self.root, pending[0]), self.config["min_free_gb"])
-            launch(self.root, kind=kind, job_ids=job_ids)
+            self.launch_process = launch(self.root, kind=kind, job_ids=job_ids)
+            self.launch_kind, self.launch_deadline = kind, time.monotonic() + 10
             atomic_json(self.root / START_ERROR_FILE, {"at": now(), "kind": kind, "message": ""})
         except Exception as exc:
             self.record_start_error(kind, str(exc))
             messagebox.showerror("Kolejka nie została uruchomiona", str(exc), parent=self.window)
+        finally:
+            self.start_pending = None
+            self.update_session_controls()
 
     def record_start_error(self, kind, message):
         from .hf_access import redact
@@ -580,6 +610,9 @@ class QueueWindow:
         (self.local_tab.note if kind == "local" else self.source_note).set("Start przerwany: " + message)
 
     def start_in_progress(self):
+        waiting = self.launch_process is not None and self.launch_process.poll() is None and time.monotonic() < self.launch_deadline
+        if self.start_pending or waiting:
+            return True
         if self.busy_import:
             messagebox.showinfo("Trwa import", "Poczekaj na zakończenie importu przed uruchomieniem kolejki.", parent=self.window)
             return True
@@ -618,6 +651,7 @@ class QueueWindow:
             messagebox.showinfo("Inna kolejka", "Użyj zatrzymania w karcie trwającej kolejki.", parent=self.window)
             return
         self.store.control(stop=1)
+        self.update_session_controls()
 
     def retry(self, kind="youtube", ids=None):
         candidates = [job["id"] for job in self.store.jobs() if job["kind"] == kind]

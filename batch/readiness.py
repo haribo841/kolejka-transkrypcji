@@ -12,7 +12,7 @@ from .common import APP, NO_WINDOW, application_python, check_disk, read_json, s
 from .diarization import validate_diarization
 from .paths import local_path, media_tool
 from .uvr import validate_uvr
-from .youtube_access import preferences
+from .youtube_access import SessionError, access_fingerprint, preferences
 
 OFF = "Wyłączony"
 CHECKING = "Sprawdzanie"
@@ -139,7 +139,22 @@ def check_youtube(config, root):
     access = preferences(root)
     if access["mode"] == "file" and not Path(access["cookie_file"]).is_file():
         raise ValueError("Wybrany plik cookies.txt nie istnieje. Otwórz Dostęp YouTube.")
+    if access["mode"] == "managed":
+        from .managed_browser import page_socket
+        try:
+            page_socket(access["profile"])
+        except Exception:
+            raise ValueError("Otwórz własne okno programu w Dostęp YouTube, zaloguj się i pozostaw otwartą kartę filmu. "
+                             "To ustawienie nie blokuje kolejki lokalnej.") from None
     return "Ustawienia dostępne. Dostęp do filmu potwierdź w Dostęp YouTube."
+
+
+def youtube_test_matches(root):
+    try:
+        tested = read_json(Path(root) / "youtube-proba.json", {})
+        return bool(tested.get("ok") and tested.get("access_signature") == access_fingerprint(preferences(root)))
+    except (OSError, ValueError, AttributeError, SessionError):
+        return False
 
 
 def component_state(enabled, check):
@@ -181,6 +196,10 @@ def collect_readiness(config, root):
     passed = bool(test.get("passed") and fingerprint and test.get("fingerprint") == fingerprint)
     if passed:
         passed_components(components, test)
+    if components["youtube"]["status"] == AVAILABLE and youtube_test_matches(root):
+        tested = read_json(Path(root) / "youtube-proba.json", {})
+        components["youtube"] = {"status": PASSED, "message": "Sprawdzono dostęp do jednego linku: " +
+                                 test_time(tested.get("at")) + ". Kolejka nadal wymaga ręcznego Start."}
     return {"components": components, "passed": passed, "fingerprint": fingerprint,
             "versions": versions, "test": test}
 

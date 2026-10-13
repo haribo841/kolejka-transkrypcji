@@ -17,9 +17,13 @@ from .importers import video_id
 from .processes import ChildGuard
 from .ui_help import Tooltip, help_button, wrap_with_parent
 from .youtube_access import DEFAULTS, SessionError, preferences, save_preferences, validate_preferences
+from .browser_profiles import discover_profiles, find_browser, open_profile
+from .managed_browser import managed_profiles, open_managed
 
 COOKIE_GUIDE = "https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies"
 BROWSER_NAMES = {"Firefox": "firefox", "Chrome": "chrome", "Edge": "edge"}
+ANONYMOUS_CHOICE = "Anonimowo, bez logowania"
+FILE_CHOICE = "Plik cookies.txt z ustawień zaawansowanych"
 
 
 def probe_process(root, request, cancelled):
@@ -68,8 +72,8 @@ class YouTubeDialog:
             saved, initial_message = dict(DEFAULTS), str(exc)
         self.dialog = tk.Toplevel(app.window)
         self.dialog.title("Dostęp YouTube")
-        self.dialog.geometry("900x690")
-        self.dialog.minsize(820, 650)
+        self.dialog.geometry("960x820")
+        self.dialog.minsize(860, 710)
         self.dialog.transient(app.window)
         self.dialog.protocol("WM_DELETE_WINDOW", self.close)
         self.help_status = tk.StringVar(master=self.dialog, value="Zaloguj się samodzielnie w przeglądarce. Program nie prosi o hasło Google.")
@@ -81,24 +85,30 @@ class YouTubeDialog:
         self.request_delay = saved["request_delay_seconds"]
         self.url = tk.StringVar(value=self.initial_url())
         self.result = tk.StringVar(value=initial_message or "Test wykonuje jedno sprawdzenie wybranego filmu. Nie pobiera audio i nie zmienia postępu kolejki.")
+        self.connection_choice = tk.StringVar(master=self.dialog)
+        self.connections, self.tested_request = {}, None
 
         frame = ttk.Frame(self.dialog, padding=16)
         frame.pack(fill="both", expand=True)
-        self.label(frame, "YouTube prosi o potwierdzenie użytkownika", bold=True)
-        self.label(frame, "Zaloguj się i wykonaj ewentualne potwierdzenie w przeglądarce. Następnie udostępnij programowi tę sesję i sprawdź jeden link. Samo logowanie nie zmienia pobierania anonimowego.")
+        self.label(frame, "Połącz z YouTube", bold=True)
+        self.label(frame, "Profile wykrywamy automatycznie. Otwórz film w wybranym profilu, zaloguj się lub potwierdź dostęp, a następnie kliknij Połącz i sprawdź dostęp.")
         self.tabs = ttk.Notebook(frame)
         self.tabs.pack(fill="both", expand=True, pady=10)
-        pages = [ttk.Frame(self.tabs, padding=16) for _ in range(3)]
-        for page, title in zip(pages, ("1. Potwierdź w przeglądarce", "2. Wybierz sesję", "3. Sprawdź dostęp")):
+        pages = [ttk.Frame(self.tabs, padding=12) for _ in range(2)]
+        for page, title in zip(pages, ("Połączenie", "Ustawienia zaawansowane")):
             self.tabs.add(page, text=title)
         self.build_login(pages[0])
         self.build_session(pages[1])
-        self.build_test(pages[2])
+        self.build_test(pages[0])
         footer = ttk.Frame(frame)
         footer.pack(fill="x")
         self.save_button = self.button(footer, "Zapisz ustawienia", self.save,
             "Zapisuje wybrane źródło sesji i przerwy. Nie odczytuje cookies i nie uruchamia pobierania. Start użyje tych ustawień.")
         self.save_button.pack(side="left")
+        self.use_button = self.button(footer, "Gotowe - użyj i zamknij", self.use_connection,
+            "Po udanym teście zatwierdza tę samą sesję i wraca do kolejki. Start pozostaje ręczny.")
+        self.use_button.pack(side="left", padx=10)
+        self.use_button.configure(state="disabled")
         self.button(footer, "Zamknij", self.close,
             "Zamyka konfigurację i anuluje ewentualny test. Zapisane ustawienia pozostają. Nie uruchamia kolejki.").pack(side="right")
         help_frame = ttk.LabelFrame(frame, text="Podpowiedź", padding=8, height=78)
@@ -127,25 +137,33 @@ class YouTubeDialog:
         return candidates[0]["source"] if candidates else ""
 
     def build_login(self, page):
-        self.label(page, "Otwórz film, na którym zatrzymało się pobieranie", bold=True)
+        self.label(page, "1. Film i źródło dostępu", bold=True)
         entry = ttk.Entry(page, textvariable=self.url)
         entry.pack(fill="x", pady=(0, 10))
         Tooltip(entry, "Link do jednego filmu YouTube. Domyślnie wybierany jest zablokowany film. Możesz wkleić inny link.", self.help_status)
+        source = ttk.Frame(page)
+        source.pack(fill="x", pady=(0, 10))
+        ttk.Label(source, text="Profil / sposób dostępu:").pack(side="left", padx=(0, 8))
+        self.connection_selector = ttk.Combobox(source, textvariable=self.connection_choice, state="readonly", width=62)
+        self.connection_selector.pack(side="left", fill="x", expand=True)
+        self.connection_selector.bind("<<ComboboxSelected>>", self.choose_connection)
+        self.button(source, "Wykryj ponownie", self.detect_connections,
+                    "Odczytuje nazwy profili i lokalizacje przeglądarek. Nie odczytuje cookies, nie testuje i nie uruchamia kolejki.").pack(side="left", padx=(8, 0))
+        self.detect_connections()
         row = ttk.Frame(page)
         row.pack(fill="x", pady=(0, 12))
-        self.button(row, "Otwórz film w przeglądarce", self.open_video,
-            "Otwiera film w domyślnej przeglądarce. Samodzielnie zaloguj się i wykonaj potwierdzenie. Jej sesję wybierz w kroku 2.").pack(side="left", padx=(0, 8))
+        self.login_button = self.button(row, "2. Zaloguj / potwierdź w wybranym profilu", self.open_video,
+            "Otwiera film w dokładnie tym profilu, którego sesji użyje test. W razie potrzeby wykonaj logowanie lub CAPTCHA w przeglądarce.")
+        self.login_button.pack(side="left", padx=(0, 8))
         self.button(row, "Kopiuj link", self.copy_link,
             "Kopiuje wyłącznie link filmu. Możesz wkleić go w wybranej przeglądarce lub profilu.").pack(side="left")
-        self.label(page, "1. Zaloguj się do YouTube w przeglądarce, z której chcesz udostępnić sesję.\n2. Jeśli YouTube wyświetli potwierdzenie lub CAPTCHA, wykonaj je samodzielnie. Sprawdź, czy film się odtwarza.\n3. W kroku 2 wybierz tę samą przeglądarkę i profil albo eksport cookies.")
-        self.label(page, "YouTube może ograniczyć także zalogowane konto lub adres IP. Logowanie nie gwarantuje zdjęcia blokady. Przy dużych kolejkach zachowaj przerwy; po ponownej blokadzie odczekaj przed kolejną próbą.")
-        self.button(page, "Dalej: wybór sesji", lambda: self.tabs.select(1),
-            "Przechodzi do wyboru sposobu udostępnienia sesji YouTube. Nie odczytuje danych z przeglądarki.").pack(anchor="e")
+        self.label(page, "Własne okno programu: zaloguj się raz i pozostaw przeglądarkę otwartą lub zminimalizowaną. Sesja jest odczytywana automatycznie, bez eksportu cookies.txt. Przy zwykłym profilu Chrome/Edge odczyt może być blokowany.")
 
     def build_session(self, page):
         self.label(page, "Jak program ma uzyskać dostęp?", bold=True)
         for mode, text, help_text in (
             ("anonymous", "Anonimowo, bez sesji konta", "Domyślne ustawienie. Program nie odczytuje cookies ani profilu przeglądarki."),
+            ("managed", "Własne okno Chrome / Edge (bez eksportu cookies)", "Zaloguj się w osobnym oknie programu. Sesja pozostaje lokalnie w tym profilu przeglądarki. Test i Start odczytują aktualne cookies YouTube."),
             ("browser", "Sesja z przeglądarki (Firefox najprostszy w Windows)", "Odczyt wybranego profilu nastąpi po naciśnięciu testu lub Start. Tryb prywatny nie jest odczytywany. Chrome i Edge mogą blokować odszyfrowanie cookies."),
             ("file", "Plik cookies.txt wyeksportowany dla YouTube", "Plik w formacie Netscape. Program odczytuje cookies YouTube i nie nadpisuje tego pliku. To nie jest token Hugging Face.")):
             option = ttk.Radiobutton(page, text=text, variable=self.mode, value=mode, command=self.update_fields)
@@ -175,29 +193,99 @@ class YouTubeDialog:
         row.pack(fill="x")
         self.button(row, "Instrukcja eksportu cookies (yt-dlp)", lambda: webbrowser.open(COOKIE_GUIDE),
             "Otwiera instrukcję yt-dlp: osobna sesja prywatna, eksport youtube.com i zamknięcie tego okna. Sesji prywatnej nie odczytuj opcją Przeglądarka.").pack(side="left")
-        self.button(row, "Dalej: test", lambda: self.tabs.select(2), "Przechodzi do pojedynczego testu dostępu. Kolejka jeszcze nie ruszy.").pack(side="right")
+        self.button(row, "Wróć do połączenia", lambda: self.tabs.select(0), "Wraca do testu dostępu z tymi ustawieniami.").pack(side="right")
         self.update_fields()
 
     def build_test(self, page):
-        self.label(page, "Zapisz wybór i sprawdź jeden film", bold=True)
-        self.label(page, "Test użyje linku z kroku 1 i sesji z kroku 2. Odczyt nastąpi dopiero po kliknięciu poniżej. Jeśli przeglądarka blokuje pliki profilu, zamknij ją całkowicie po zalogowaniu i ponów test.")
+        self.label(page, "3. Połącz i sprawdź jeden film", bold=True)
         row = ttk.Frame(page)
         row.pack(fill="x", pady=(0, 12))
         ttk.Label(row, text="Przerwa przed każdym filmem (sekundy):").pack(side="left")
         delay = ttk.Spinbox(row, from_=5, to=300, textvariable=self.delay, width=6)
         delay.pack(side="left", padx=8)
         Tooltip(delay, "Domyślnie 15 sekund przed próbą pobrania filmu i 1 sekunda między żądaniami metadanych. Test też czeka. Przerwy zmniejszają tempo żądań, lecz nie gwarantują braku blokad.", self.help_status)
-        self.test_button = self.button(page, "Zapisz i sprawdź link", self.test,
+        self.test_button = self.button(page, "Połącz i sprawdź dostęp", self.test,
             "Zapisuje ustawienia, odczytuje wybraną sesję i sprawdza formaty jednego filmu. Nie pobiera audio, nie ponawia automatycznie i nie uruchamia kolejki.")
         self.test_button.pack(anchor="w", pady=(0, 10))
+        self.firefox_button = self.button(page, "Użyj wykrytego Firefoksa", self.use_firefox,
+            "Wybiera istniejący profil Firefoksa i otwiera w nim film. Potwierdź logowanie, następnie użyj testu.")
+        self.firefox_button.pack(anchor="w", pady=(0, 6))
+        self.firefox_button.configure(state="disabled")
         self.progress = ttk.Progressbar(page, mode="indeterminate")
         self.progress.pack(fill="x", pady=(0, 10))
         result_label = ttk.Label(page, textvariable=self.result, justify="left", wraplength=790)
         result_label.pack(fill="x", pady=(0, 12))
         wrap_with_parent(result_label, 34)
-        self.label(page, "Po udanym sprawdzeniu zamknij to okno i naciśnij Start/Wznów. Zablokowany film będzie ponowiony, a gotowe pozostaną pominięte. Inne wcześniejsze błędy można zaznaczyć i przywrócić przez Ponów nieudane.")
+        self.label(page, "Po sukcesie kliknij Gotowe - użyj i zamknij, potem ręcznie Start/Wznów. Logowanie nie gwarantuje usunięcia ograniczenia konta lub adresu IP.")
+
+    def detect_connections(self):
+        profiles = discover_profiles()
+        owned = managed_profiles(self.app.root)
+        records = [{"mode": "anonymous", "label": ANONYMOUS_CHOICE}, {"mode": "file", "label": FILE_CHOICE}, *owned, *profiles]
+        self.connections = {record["label"]: record for record in records}
+        self.connection_selector.configure(values=list(self.connections))
+        selected = next((record["label"] for record in [*owned, *profiles] if record["mode"] == self.mode.get() and
+                         record["browser"] == BROWSER_NAMES.get(self.browser.get()) and
+                         (not self.profile.get() or record["profile"] == self.profile.get())), None)
+        self.connection_choice.set(selected or (FILE_CHOICE if self.mode.get() == "file" else ANONYMOUS_CHOICE))
+        if selected:
+            self.choose_connection()
+
+    def choose_connection(self, event=None):
+        record = self.connections[self.connection_choice.get()]
+        self.mode.set(record["mode"])
+        if record["mode"] in {"browser", "managed"}:
+            self.browser.set(next(name for name, code in BROWSER_NAMES.items() if code == record["browser"]))
+            self.profile.set(record["profile"])
+        if hasattr(self, "browser_choice"):
+            self.update_fields()
+        if hasattr(self, "use_button"):
+            self.use_button.configure(state="disabled")
+        self.tested_request = None
+
+    def use_connection(self):
+        if self.tested_request is None:
+            return
+        tested = self.tested_request
+        try:
+            changed = tested["access"] != self.values() or video_id(tested["url"]) != video_id(self.url.get())
+        except ValueError:
+            changed = True
+        if changed:
+            self.result.set("Zmieniono ustawienia. Sprawdź ponownie dostęp przed zatwierdzeniem.")
+            self.use_button.configure(state="disabled")
+            return
+        self.app.request_readiness(force=True)
+        self.close()
+
+    def use_firefox(self):
+        choice = next((item for item in self.connections.values() if item.get("browser") == "firefox"), None)
+        if choice:
+            self.connection_choice.set(choice["label"])
+            self.choose_connection()
+            self.open_video()
+
+    def login_profile(self):
+        if self.mode.get() in {"browser", "managed"}:
+            browser, path = BROWSER_NAMES[self.browser.get()], self.profile.get()
+            match = next((item for item in self.connections.values() if item["mode"] == self.mode.get() and item.get("browser") == browser and
+                          (not path or item["profile"] == path)), None)
+            if match:
+                return match
+            if path:
+                return {"mode": "browser", "browser": browser, "profile": path, "executable": find_browser(browser)}
+        return next((item for item in self.connections.values() if item["mode"] in {"managed", "browser"}), None)
 
     def update_fields(self):
+        if self.mode.get() == "managed":
+            choices = [item for item in self.connections.values() if item["mode"] == "managed"]
+            choice = next((item for item in choices if item["browser"] == BROWSER_NAMES.get(self.browser.get())), None)
+            if choice is None and choices:
+                choice = choices[0]
+            if choice:
+                self.browser.set(next(name for name, code in BROWSER_NAMES.items() if code == choice["browser"]))
+                self.profile.set(choice["profile"])
+                self.connection_choice.set(choice["label"])
         browser, file = self.mode.get() == "browser", self.mode.get() == "file"
         self.browser_choice.configure(state="readonly" if browser else "disabled")
         for widget in (self.profile_entry, self.profile_button):
@@ -215,6 +303,9 @@ class YouTubeDialog:
             filetypes=[("Cookies TXT", "*.txt"), ("Wszystkie", "*.*")], parent=self.dialog)
         if path:
             self.cookie_file.set(path)
+            self.mode.set("file")
+            self.connection_choice.set(FILE_CHOICE)
+            self.update_fields()
 
     def canonical_url(self):
         identifier = video_id(self.url.get().strip())
@@ -226,8 +317,22 @@ class YouTubeDialog:
 
     def open_video(self):
         url = self.canonical_url()
-        if url:
+        if not url or self.checking:
+            return
+        record = self.login_profile()
+        if record is None:
+            self.result.set("Nie wykryto profilu przeglądarki. Otwórz film i zaloguj się, potem kliknij Wykryj ponownie lub wskaż profil w zaawansowanych.")
             webbrowser.open(url)
+            return
+        if record.get("label"):
+            self.connection_choice.set(record["label"])
+            self.choose_connection()
+        try:
+            opener = open_managed if record["mode"] == "managed" else open_profile
+            opener(record, url)
+            self.result.set("Otwarto wybrany profil. Zaloguj się lub potwierdź odtwarzanie, następnie wróć i kliknij Połącz i sprawdź dostęp.")
+        except (ValueError, OSError) as exc:
+            self.result.set(str(exc))
 
     def copy_link(self):
         url = self.canonical_url()
@@ -271,6 +376,8 @@ class YouTubeDialog:
         self.cancelled.clear()
         self.test_button.configure(state="disabled")
         self.save_button.configure(state="disabled")
+        self.use_button.configure(state="disabled")
+        self.tested_request = None
         self.progress.start(15)
         self.result.set(f"Sprawdzanie jednego filmu, z przerwą {values['delay_seconds']:g} s, a następnie do 90 s na odpowiedź. Kolejka pozostaje zatrzymana.")
         request = {"url": url, "config": dict(self.app.config), "access": values}
@@ -288,17 +395,30 @@ class YouTubeDialog:
             return
         while not self.events.empty():
             tested, result = self.events.get_nowait()
-            self.checking = False
-            self.progress.stop()
-            self.test_button.configure(state="normal")
-            self.save_button.configure(state="normal")
-            try:
-                changed = tested["access"] != self.values() or video_id(tested["url"]) != video_id(self.url.get())
-            except ValueError:
-                changed = True
-            suffix = "\nZmieniono pola w trakcie testu. Wynik dotyczy wcześniejszego linku i zapisanych ustawień; nowy wybór trzeba zapisać i sprawdzić." if changed else ""
-            self.result.set(result["message"] + suffix)
+            self.show_probe_result(tested, result)
         self.after_id = self.dialog.after(250, self.poll)
+
+    def show_probe_result(self, tested, result):
+        self.checking = False
+        self.progress.stop()
+        self.test_button.configure(state="normal")
+        self.save_button.configure(state="normal")
+        try:
+            changed = tested["access"] != self.values() or video_id(tested["url"]) != video_id(self.url.get())
+        except ValueError:
+            changed = True
+        suffix = "\nZmieniono pola w trakcie testu. Wynik dotyczy wcześniejszego linku i zapisanych ustawień; nowy wybór trzeba zapisać i sprawdzić." if changed else ""
+        self.result.set(result["message"] + suffix)
+        self.tested_request = tested if result["ok"] and not changed else None
+        self.use_button.configure(state="normal" if self.tested_request else "disabled")
+        has_firefox = any(item.get("browser") == "firefox" for item in self.connections.values())
+        self.firefox_button.configure(state="normal" if not result["ok"] and has_firefox else "disabled")
+        if self.tested_request:
+            from .common import atomic_json
+            from .store import now
+            from .youtube_access import access_fingerprint
+            atomic_json(self.app.root / "youtube-proba.json", {"ok": True, "at": now(),
+                        "access_signature": access_fingerprint(tested["access"]), "video_id": video_id(tested["url"])})
 
     def close(self):
         if self.closed:

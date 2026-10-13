@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import time
 
-from .common import ResourceError, atomic_json, read_json
+from .common import ResourceError, atomic_json, read_json, signature
 
 SETTINGS_FILE = "youtube-dostep.json"
 BROWSERS = ("firefox", "chrome", "edge")
@@ -31,7 +31,7 @@ class QuietLogger:
 
 def validate_preferences(values):
     values = {key: values.get(key, default) for key, default in DEFAULTS.items()}
-    if values["mode"] not in {"anonymous", "browser", "file"} or values["browser"] not in BROWSERS:
+    if values["mode"] not in {"anonymous", "browser", "file", "managed"} or values["browser"] not in BROWSERS:
         raise ValueError("Wybierz pobieranie anonimowe, sesję przeglądarki albo plik cookies.")
     for key in ("profile", "cookie_file"):
         if not isinstance(values[key], str) or any(c in values[key] for c in ("\x00", "\n", "\r")):
@@ -39,6 +39,8 @@ def validate_preferences(values):
         values[key] = values[key].strip()
     if values["mode"] == "file" and not values["cookie_file"]:
         raise ValueError("Wskaż plik cookies.txt wyeksportowany dla youtube.com.")
+    if values["mode"] == "managed" and (values["browser"] not in {"chrome", "edge"} or not values["profile"]):
+        raise ValueError("Wybierz własne okno Chrome lub Edge z listy wykrytych sposobów dostępu.")
     for key, low, high in (("delay_seconds", 5, 300), ("request_delay_seconds", 1, 10)):
         number = float(values[key])
         if not math.isfinite(number) or not low <= number <= high:
@@ -59,6 +61,18 @@ def save_preferences(root, values):
     # Only the source choice and paths are stored, never account/session data.
     atomic_json(Path(root) / SETTINGS_FILE, values)
     return values
+
+
+def access_fingerprint(values):
+    values = validate_preferences(values)
+    stamp = None
+    if values["mode"] == "file":
+        try:
+            info = Path(values["cookie_file"]).stat()
+            stamp = [info.st_size, info.st_mtime_ns]
+        except OSError:
+            pass
+    return signature({"access": values, "file_stamp": stamp})
 
 
 def youtube_domain(domain):
@@ -111,13 +125,41 @@ def file_cookies(path):
         raise SessionError("Nie można odczytać wybranego pliku cookies. Sprawdź ścieżkę i dostęp do pliku.") from None
 
 
-def session_cookies(values):
+def managed_cookie_jar(values, node):
+    from yt_dlp.cookies import YoutubeDLCookieJar
+    from .managed_browser import read_cookies
+    jar = YoutubeDLCookieJar()
+    try:
+        for item in read_cookies(values["profile"], node):
+            cookie = managed_cookie(item)
+            if cookie is not None:
+                jar.set_cookie(cookie)
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        jar.clear()
+        raise SessionError("Niepoprawna odpowiedź własnego okna przeglądarki. Otwórz film i ponów test dostępu.") from None
+    return jar
+
+
+def managed_cookie(item):
+    expiration = int(item.get("expires", -1))
+    if not youtube_domain(item.get("domain")) or (expiration > 0 and expiration <= time.time()):
+        return None
+    domain = item["domain"]
+    return Cookie(0, item["name"], item["value"], None, False, domain, domain.startswith("."),
+                  domain.startswith("."), item.get("path", "/"), True, item.get("secure", False),
+                  expiration if expiration > 0 else None, expiration <= 0, None, None,
+                  {"HttpOnly": None} if item.get("httpOnly") else {}, False)
+
+
+def session_cookies(values, node=None):
     from yt_dlp.cookies import YoutubeDLCookieJar, extract_cookies_from_browser
     values = validate_preferences(values)
     mode = values["mode"]
     if mode == "anonymous":
         return None
-    if mode == "file":
+    if mode == "managed":
+        jar = managed_cookie_jar(values, node)
+    elif mode == "file":
         jar = file_cookies(values["cookie_file"])
     else:
         try:
@@ -140,7 +182,11 @@ def session_cookies(values):
 def youtube_client(options, values):
     import yt_dlp
     # Read the explicitly selected session before building any network handler.
-    jar = session_cookies(values)
+    if values.get("mode") == "managed":
+        node = options.get("js_runtimes", {}).get("node", {}).get("path")
+        jar = session_cookies(values, node=node)
+    else:
+        jar = session_cookies(values)
     try:
         with yt_dlp.YoutubeDL(dict(options, cookiefile=None, cookiesfrombrowser=None)) as ydl:
             if jar is not None:

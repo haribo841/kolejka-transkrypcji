@@ -12,7 +12,7 @@ from .store import RETRYABLE, STATUSES
 from .ui_help import (HELP, Tooltip, collapsible_help, duration_text, help_button,
                       status_tags, sync_tree, wrap_with_parent)
 from .local_outputs import OUTPUT_MODES, scan_media
-from .readiness import readiness_summary
+from .session_button import SessionButton
 
 ENABLED_STATE = "!disabled"
 
@@ -157,7 +157,8 @@ class LocalQueueTab:
         Tooltip(widget, hint, self.hint)
 
     def button(self, parent, key, text, command, hint):
-        button = help_button(parent, text, command, hint, self.hint)
+        factory = SessionButton if key == "start" else help_button
+        button = factory(parent, text, command, hint, self.hint)
         self.controls[key] = button
         return button
 
@@ -320,27 +321,33 @@ class LocalQueueTab:
         job = self.app.jobs.get(control["current_id"])
         scope = job["kind"] if job else control.get("scope_kind", "all")
         self.show_current(control, alive, job, scope)
-        self.controls["start"].state(["disabled"] if alive or self.app.busy_import or self.app.metadata_busy or
-                                      not readiness_summary(self.app.readiness, "local")[0] else [ENABLED_STATE])
-        self.controls["stop"].state([ENABLED_STATE] if alive and scope == "local" else ["disabled"])
+        session = alive and control["state"] == "running"
+        self.controls["stop"].state([ENABLED_STATE] if session and scope == "local" else ["disabled"])
         for key in ("browse", "import_folder", "files"):
             self.controls[key].state(["disabled"] if self.app.busy_import else [ENABLED_STATE])
 
     def show_current(self, control, alive, job, scope):
-        if alive and scope == "local":
+        session = alive and control["state"] == "running"
+        if session and scope == "local":
             suffix = " | Zatrzymam się po tym nagraniu." if control["stop"] else ""
             self.current.set((f"{job['title']} | {job['stage']}" if job else "Przygotowanie lokalnej sesji...") + suffix)
             self.progress["value"] = job["progress"] if job else 0
-        elif alive:
+        elif session:
             self.current.set("Trwa inna sesja. Dokończ bieżący i zatrzymaj ją w karcie YouTube, potem uruchom kolejkę lokalną.")
             self.progress["value"] = 0
-        else:
-            message = control["message"][:500] if scope == "local" else ""
-            failure = read_json(self.app.root / "ostatni-blad-start.json", {})
-            if not message and failure.get("kind") == "local":
-                message = failure.get("message", "")
-            self.current.set("Kolejka lokalna zatrzymana. " + message)
+        elif alive:
+            self.current.set("Trwa test dostępu lub przygotowanie sesji. Poczekaj na jego zakończenie albo anuluj test.")
             self.progress["value"] = 0
+        else:
+            self.current.set("Kolejka lokalna zatrzymana. " + self.stopped_message(control, scope))
+            self.progress["value"] = 0
+
+    def stopped_message(self, control, scope):
+        message = control["message"][:500] if scope == "local" else ""
+        failure = read_json(self.app.root / "ostatni-blad-start.json", {})
+        if not message and failure.get("kind") == "local":
+            message = failure.get("message", "")
+        return message
 
     def show_detail(self, event=None):
         ids = self.selected()

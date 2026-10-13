@@ -13,6 +13,7 @@ A Windows desktop application built with Python and Tkinter/ttk for processing Y
 - Choose where local results are saved: a dedicated subfolder beside the source, the central results directory, or a custom directory. Existing jobs retain their destinations.
 - Process one recording at a time, in chronological order, with search, filters, language overrides, and audio track selection.
 - Start or resume a session, or finish the current recording and then stop. The worker continues when the window closes; reopening the application reconnects to the queue.
+- Start stays visibly pressed during launch and processing, prevents repeated launches, and returns to its idle state when the worker stops. Failed preflight checks show their reason and restore the button.
 - Resume transcription, speaker diarization, and vocal separation from verified checkpoints after an interruption.
 - Whisper large-v3-turbo through OpenVINO GenAI on CPU, word timestamps, pyannote Community-1 for speaker diarization, and optional Universal Vocal Remover (UVR) through audio-separator.
 - Optionally retain source audio and the separated vocal track. Original local files remain untouched.
@@ -99,7 +100,11 @@ To open the local tab with a chosen folder, without importing or starting proces
 
 ## YouTube access and outputs
 
-Downloads are anonymous by default. If YouTube requests confirmation, the access dialog can open the video in a browser, use a Firefox/Chrome/Edge session or a local Netscape-format `cookies.txt` file, and test one link. Sign in through your browser. A session does not guarantee that account or IP restrictions will be lifted. See the [yt-dlp documentation](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
+Downloads are anonymous by default. The access dialog detects Chrome and Edge and offers a dedicated browser window for the application. The login button selects this option automatically when no session has been chosen. Sign in once in that window, open the video, and leave the window open or minimized. The test and downloader read the current YouTube session from that local window; no manual `cookies.txt` export is needed. The browser keeps its own profile beside the queue settings, separate from your regular browser profiles. Closing the window requires reopening it before resuming YouTube downloads.
+
+The same screen also lists existing Firefox/Chrome/Edge profiles. Advanced settings retain manual profile paths and Netscape-format `cookies.txt` imports. Profile discovery does not read cookies; session access happens when you explicitly test a link or start processing. Only YouTube cookies are passed to the downloader, held in memory and excluded from application logs and reports. A successful test can be confirmed with one button without starting the queue. YouTube access settings do not block the local queue.
+
+Sign in and complete any YouTube confirmation in your browser. A session does not guarantee that account or IP restrictions will be lifted. If browser access fails and Firefox is available, the dialog offers a button to select its profile and open the login page. See the [yt-dlp documentation](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
 
 Each recording has its own directory, with output filenames containing its YouTube ID or local content hash. A job is marked complete only after the full set of exports has been written and verified. Review the recognized text, language, and speaker labels: music, overlapping voices, and block boundaries can cause recognition errors.
 
@@ -114,6 +119,8 @@ The transcription, diarization, and vocal separation stages process audio locall
 ```
 
 The test suite uses synthetic data and temporary directories. YouTube downloads and neural model calls are replaced with controlled test doubles. FFmpeg integration tests use generated audio and video; these tests are skipped if the tools are unavailable. Windows CI installs the pinned application and test dependencies plus FFmpeg 8.0.1, then runs the same offline suite. Local installations using FFmpeg 9 keep their version. Tests with real model weights and recordings are separate from the offline suite and are documented in the [validation notes](docs/WERYFIKACJA.md).
+
+SonarQube Cloud uses automatic analysis configured in [.sonarcloud.properties](.sonarcloud.properties). The Python versions are 3.12 and 3.13, matching the installed environments. Test files are explicitly listed under `sonar.tests` and excluded from the production scope. When adding a test file, update both lists in that configuration. Production files remain in scope; no rules are suppressed.
 
 ## Repository history
 

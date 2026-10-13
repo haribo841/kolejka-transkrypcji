@@ -97,7 +97,8 @@ class RealContainerTailTests(unittest.TestCase):
                     self.assertGreater(duration - info.frames / UVR_RATE, .05)
                     stem = stage / "stem.flac"
                     frames = write_vocal_block(generated, stem, block, prepared=prepared, final=True)
-                    self.assertEqual(frames, round(duration * UVR_RATE))
+                    # Container duration is quantized to the nearest audio sample.
+                    self.assertAlmostEqual(frames / UVR_RATE, duration, delta=0.5 / UVR_RATE)
                     self.assertEqual(sf.info(stem).frames, frames)
                     samples, _ = sf.read(stem, always_2d=True)
                     self.assertGreater(float(np.max(np.abs(samples[:info.frames]))), .01)

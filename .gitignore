@@ -39,6 +39,7 @@ worker.lock
 .env.*
 ustawienia.json
 youtube-dostep.json
+youtube-browser-*/
 konfiguracja*.json
 pierwsza-proba.json
 *request.json
