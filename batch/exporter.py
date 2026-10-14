@@ -11,10 +11,10 @@ from .result_paths import (EXTENSIONS, LEGACY_OUTPUTS, assert_output_owner, outp
 OUTPUTS = LEGACY_OUTPUTS
 
 
-def verify_outputs(folder, identity, signature=None):
+def verify_outputs(folder, identity, signature=None, *, partial=False):
     folder = Path(folder)
     try:
-        manifest = read_json(folder / "gotowe.json")
+        manifest = read_json(folder / ("czesciowe.json" if partial else "gotowe.json"))
         if not manifest or manifest["identity"] != identity or (signature and manifest["signature"] != signature):
             return False
         paths = output_paths(folder, manifest)
@@ -28,25 +28,33 @@ def verify_outputs(folder, identity, signature=None):
             if not path.is_relative_to(folder.resolve()) or digest(path) != checksum:
                 return False
         report = read_json(paths["json"])
-        if report["identity"] != identity or not report["complete"]:
+        if report["identity"] != identity or bool(report.get("complete", True)) == partial:
             return False
         return True
     except (ValueError, KeyError, OSError, TypeError):
         return False
 
 
-def export(folder, report, execution_signature):
-    folder = Path(folder)
-    assert_output_owner(folder, report["identity"])
-    duration = report["duration"]
-    segments = report["segments"]
+def validate_segments(segments, duration):
     for segment in segments:
         if not all(math.isfinite(segment[name]) for name in ("start", "end")):
             raise ValueError("Niepoprawny timestamp wyniku.")
         if not 0 <= segment["start"] <= segment["end"] <= duration + .01:
             raise ValueError("Wynik zawiera przedział poza nagraniem.")
-    report["complete"] = True
+
+
+def export(folder, report, execution_signature, *, complete=True):
+    folder = Path(folder)
+    assert_output_owner(folder, report["identity"])
+    duration = report["duration"] if complete else report["processed_until"]
+    segments = report["segments"]
+    validate_segments(segments, duration)
+    report["complete"] = complete
     lines = [f"{report['title']}\n"]
+    if not complete:
+        lines.append(f"[WYNIK CZĘŚCIOWY: do {timestamp(duration)} z {timestamp(report['duration'])}]\n")
+        lines.append("Przy następnym Start program podejmie brakującą część.\n\n")
+        lines.append("Przyczyna: " + report.get("incomplete_reason", {}).get("message", "Niepełne audio.") + "\n\n")
     srt, vtt = [], ["WEBVTT\n\n"]
     cue_number = 0
     for segment in segments:
@@ -65,14 +73,16 @@ def export(folder, report, execution_signature):
         lines.append("[Brak rozpoznanych wypowiedzi]\n")
     content = dict(zip(EXTENSIONS, ("".join(lines), "".join(srt), "".join(vtt),
                                   json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))))
-    paths = unused_paths(folder, output_stem(report["title"], report["identity"]))
+    stem = output_stem(report["title"], report["identity"]) + ("" if complete else "_czesciowa")
+    paths = unused_paths(folder, stem, identity=report["identity"])
     for extension, path in paths.items():
         atomic_new_bytes(path, content[extension].encode("utf-8"))
     manifest = {"format_version": 2, "identity": report["identity"], "signature": execution_signature,
                 "outputs": {ext: path.name for ext, path in paths.items()},
                 "files": {path.name: digest(path) for path in paths.values()},
                 "audio_files": {name: digest(folder / name) for name in report.get("retained_audio", [])}}
-    atomic_json(folder / "gotowe.json", manifest)
-    if not verify_outputs(folder, report["identity"], execution_signature):
+    manifest.update(complete=complete, processed_until=report.get("processed_until", duration))
+    atomic_json(folder / ("gotowe.json" if complete else "czesciowe.json"), manifest)
+    if not verify_outputs(folder, report["identity"], execution_signature, partial=not complete):
         raise OSError("Sprawdzenie zapisanych wyników nie powiodło się.")
     return paths

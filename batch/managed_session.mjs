@@ -5,7 +5,7 @@ for await (const chunk of process.stdin) chunks.push(chunk);
 try {
   const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
   const address = new URL(request.socket);
-  if (address.protocol !== 'ws:' || address.hostname !== '127.0.0.1') throw new Error();
+  if (address.protocol !== 'ws:' || address.hostname !== '127.0.0.1') throw new Error('Only a local browser endpoint is allowed');
   const cookies = await new Promise((resolve, reject) => {
     const socket = new WebSocket(request.socket);
     let finished = false;
@@ -14,7 +14,7 @@ try {
       finished = true;
       clearTimeout(timeout);
       socket.close();
-      if (failed) reject(new Error());
+      if (failed) reject(new Error('Local browser session unavailable'));
       else resolve(value);
     };
     const timeout = setTimeout(() => finish(null, true), 15000);
@@ -28,7 +28,7 @@ try {
       try {
         const response = JSON.parse(event.data);
         if (response.id !== 1) return;
-        if (response.error || !Array.isArray(response.result?.cookies)) throw new Error();
+        if (response.error || !Array.isArray(response.result?.cookies)) throw new Error('Invalid browser session response');
         finish(response.result.cookies.filter((cookie) => {
           const domain = String(cookie.domain).replace(/^\./, '').toLowerCase();
           return domain === 'youtube.com' || domain.endsWith('.youtube.com');

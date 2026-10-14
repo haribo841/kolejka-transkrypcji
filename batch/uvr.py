@@ -10,6 +10,7 @@ from .common import APP, NO_WINDOW, ResourceError, atomic_json, check_disk, dige
 from .media import probe
 from .paths import child_path, input_file, local_path, media_tool, output_file
 from .processes import ChildGuard
+from .failures import JobError, resource_failure
 
 
 def validate_uvr(config):
@@ -21,7 +22,7 @@ def validate_uvr(config):
             raise ResourceError("Brak modelu UVR. Kliknij Pobierz model UVR.")
 
 
-def separate(source, work, folder, track, config, progress):
+def separate(source, work, folder, track, config, progress, *, recovery_only=False):
     validate_uvr(config)
     source, work, folder = input_file(source), local_path(work), local_path(folder)
     key = signature({"source": digest(source), "track": track, "model": config["uvr_model"],
@@ -29,11 +30,11 @@ def separate(source, work, folder, track, config, progress):
                      "seconds": config["uvr_seconds"], "context": config["uvr_context"], "version": 1})
     output = folder / "audio" / "wokal.flac"
     manifest = read_json(work / "uvr-result.json")
-    if manifest and manifest.get("signature") == key and output.is_file() and digest(output) == manifest["sha256"]:
+    if manifest and manifest.get("complete", True) and manifest.get("signature") == key and output.is_file() and digest(output) == manifest["sha256"]:
         progress("UVR: używam zachowanego wokalu", 100)
         return output, manifest
     request = {"source": str(source), "work": str(work), "output": str(output), "track": track,
-               "config": config, "signature": key}
+               "config": config, "signature": key, "recovery_only": recovery_only}
     atomic_json(work / "uvr-request.json", request)
     env = dict(os.environ, PYTHONIOENCODING="utf-8", DO_NOT_TRACK="1")
     env["PATH"] = str(Path(config["ffmpeg"]).parent) + os.pathsep + env.get("PATH", "")
@@ -41,7 +42,7 @@ def separate(source, work, folder, track, config, progress):
         process = subprocess.Popen([config["uvr_python"], "-m", "batch.uvr_child", str(work / "uvr-request.json")],
             cwd=APP, stdout=subprocess.PIPE, stderr=log, encoding="utf-8", errors="replace", env=env,
             creationflags=NO_WINDOW)
-        error = ""
+        error, failure_scope, failure_code = "", "job", "uvr_failed"
         with ChildGuard(process):
             for line in process.stdout:
                 try:
@@ -50,15 +51,28 @@ def separate(source, work, folder, track, config, progress):
                     continue
                 if "error" in event:
                     error = event["error"]
+                    failure_scope, failure_code = event.get("scope", "job"), event.get("code", "uvr_failed")
                 else:
                     progress(event.get("message", "Separacja UVR"), event.get("percent", 0))
             code = process.wait()
             process.stdout.close()
     if code:
-        raise ResourceError("Separacja UVR nie została ukończona: " + (error or "sprawdź uvr.log"))
+        message = "Separacja UVR nie została ukończona: " + (error or "sprawdź uvr.log")
+        if failure_scope == "session":
+            raise ResourceError(message)
+        raise JobError(message, failure_code)
     manifest = read_json(work / "uvr-result.json")
-    if not manifest or manifest.get("signature") != key or not output.is_file() or digest(output) != manifest["sha256"]:
-        raise ResourceError("Niekompletny wynik UVR. Zachowano pobrane audio i ukończone bloki.")
+    return verified_vocal(folder, manifest, key)
+
+
+def verified_vocal(folder, manifest, key):
+    try:
+        output = child_path(folder, str(Path(manifest["output"]).relative_to(folder)))
+        valid = manifest["signature"] == key and output.is_file() and digest(output) == manifest["sha256"]
+    except (ValueError, KeyError, TypeError, OSError):
+        valid = False
+    if not valid:
+        raise JobError("Niekompletny wynik UVR. Zachowano pobrane audio i ukończone bloki.", "uvr_result_invalid")
     return output, manifest
 
 
@@ -97,16 +111,19 @@ def archive_source(source, folder, track, config):
             with ChildGuard(process):
                 code = process.wait()
             if code:
-                raise ResourceError("Nie udało się zachować źródłowej ścieżki audio.")
+                message = (audio_dir / "archiwizacja.log").read_text(encoding="utf-8", errors="replace")[-2000:]
+                if resource_failure(RuntimeError(message)):
+                    raise ResourceError("Archiwizacja audio: " + message)
+                raise JobError("Nie udało się zachować ścieżki audio: " + message, "audio_archive_failed")
         if not temporary.stat().st_size:
-            raise ResourceError("Archiwum audio jest puste.")
+            raise JobError("Archiwum audio jest puste.", "audio_archive_failed")
     else:
         with source.open("rb") as reader, temporary.open("wb") as writer:
             shutil.copyfileobj(reader, writer, length=1024 * 1024)
             writer.flush()
             os.fsync(writer.fileno())
         if digest(temporary) != source_hash:
-            raise ResourceError("Kopia źródłowego audio nie przeszła weryfikacji.")
+            raise JobError("Kopia źródłowego audio nie przeszła weryfikacji.", "audio_archive_failed")
     os.replace(temporary, destination)
     atomic_json(audio_dir / "zrodlo.json", {"source_sha256": source_hash, "track": track,
                 "file": destination.name, "sha256": digest(destination), "stream_copy": muxed})

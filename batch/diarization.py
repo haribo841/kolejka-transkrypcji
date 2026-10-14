@@ -7,6 +7,7 @@ import subprocess
 
 from .asr import valid_checkpoint
 from .common import APP, NO_WINDOW, ResourceError, atomic_json, read_json, signature
+from .failures import JobError
 
 
 def validate_diarization(config):
@@ -35,7 +36,7 @@ def run_diarization(pcm, duration, pcm_key, work, config, progress):
             cwd=APP, env=env, stdout=subprocess.PIPE, stderr=log, text=True,
             encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
         from .processes import ChildGuard
-        error = ""
+        error, scope = "", "job"
         with ChildGuard(process):
             for line in process.stdout:
                 try:
@@ -44,13 +45,17 @@ def run_diarization(pcm, duration, pcm_key, work, config, progress):
                     continue
                 if "error" in event:
                     error = event["error"]
+                    scope = event.get("scope", "job")
                 else:
                     progress(event.get("message", "Mówcy"), event.get("percent", 0))
             code = process.wait()
             process.stdout.close()
     if code:
-        raise ResourceError("Diarizacja nie została ukończona: " + (error or f"kod {code}; zobacz pyannote.log"))
+        message = "Diarizacja nie została ukończona: " + (error or f"kod {code}; zobacz pyannote.log")
+        if scope == "session":
+            raise ResourceError(message)
+        raise JobError(message, "diarization_failed")
     result = valid_checkpoint(work / "diar-result.json", request["signature"])
     if result is None:
-        raise ResourceError("Brak kompletnego, poprawnego wyniku diarizacji.")
+        raise JobError("Brak kompletnego, poprawnego wyniku diarizacji.", "diarization_result_invalid")
     return result["blocks"]

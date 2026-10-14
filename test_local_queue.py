@@ -91,18 +91,22 @@ class LocalTabTests(unittest.TestCase):
         self.assertTrue(all(job["enabled"] for job in self.app.store.jobs()))
 
     def test_selected_local_session_does_not_disable_other_jobs(self):
-        self.app.local_tab.selected_only.set(True)
         self.app.local_tab.tree.selection_set(str(self.local_ids[1]))
         with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
-            self.app.local_tab.start()
+            self.app.local_tab.start_selected()
             launch.assert_called_once_with(self.root, kind="local", job_ids=[self.local_ids[1]])
         self.assertTrue(all(job["enabled"] for job in self.app.store.jobs()))
 
     def test_empty_local_selection_does_not_start(self):
-        self.app.local_tab.selected_only.set(True)
         with patch("batch.local_tab.messagebox.showinfo"), patch("batch.gui.launch") as launch:
-            self.app.local_tab.start()
+            self.app.local_tab.start_selected()
         launch.assert_not_called()
+
+    def test_main_local_start_ignores_selection(self):
+        self.app.local_tab.tree.selection_set(str(self.local_ids[1]))
+        with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
+            self.app.local_tab.start()
+        launch.assert_called_once_with(self.root, kind="local", job_ids=None)
 
     def test_idle_session_can_resume_abandoned_running_local_jobs(self):
         for ident in self.local_ids:
@@ -192,6 +196,49 @@ class LocalTabTests(unittest.TestCase):
         self.assertEqual(tab.search.get(), "Wykład")
         self.assertEqual(tab.status.get(), "Oczekuje")
         self.assertEqual(self.app.store.jobs(), before)
+
+    def test_technical_scan_switch_persists_and_applies_to_next_import(self):
+        source = self.root / "pakiet" / "site-packages"
+        source.mkdir(parents=True)
+        recording = source / "example.wav"
+        recording.write_bytes(b"technical fixture")
+        tab = self.app.local_tab
+        tab.folder.set(str(source.parent))
+        with patch("batch.media.media_metadata", return_value={"duration": 1, "audio_tracks": []}), \
+                patch("batch.gui.launch") as launch:
+            tab.add_folder()
+            self.wait_for_import()
+            self.assertEqual(len(self.app.store.jobs()), 3)
+            tab.include_technical.set(True)
+            tab.save_view()
+            self.assertEqual(len(self.app.store.jobs()), 3)
+            tab.add_folder()
+            self.wait_for_import()
+            launch.assert_not_called()
+        self.assertEqual(len(self.app.store.jobs()), 4)
+        state = json.loads((self.root / "lokalne-ui.json").read_text(encoding="utf-8"))
+        self.assertTrue(state["include_technical"])
+
+    def test_output_required_details_offer_the_existing_fix_without_start(self):
+        job = self.app.store.get(self.local_ids[0])
+        metadata = json.loads(job["source_meta"])
+        metadata.update(output_error="Ścieżka wyników jest zbyt długa", intended_output_root="C:/very/deep")
+        with self.app.store.connect() as db:
+            db.execute("UPDATE jobs SET status='output_required',source_meta=?,error_code='output_path' WHERE id=?",
+                       (json.dumps(metadata), job["id"]))
+        self.app.jobs = {row["id"]: row for row in self.app.store.jobs()}
+        tab = self.app.local_tab
+        tab.render()
+        tab.tree.selection_set(str(job["id"]))
+        tab.show_detail()
+        self.assertIn("Wymagany krótszy folder", tab.detail.get())
+        self.assertIn("Zmień miejsce wyników", tab.detail.get())
+        self.assertFalse(tab.eligible(self.app.jobs[job["id"]]))
+        tab.output_mode.set("Folder centralny")
+        with patch("batch.gui.launch") as launch:
+            tab.change_output()
+            launch.assert_not_called()
+        self.assertEqual(self.app.store.get(job["id"])["status"], "pending")
 
     def test_empty_folder_import_explains_filters_and_rescan_uses_typed_path(self):
         source = self.root / "filmy"

@@ -86,7 +86,8 @@ def configuration_fingerprint(config, versions=None):
             stamps.extend(file_stamp(p) for p in sorted(directory.rglob("*"))
                           if p.is_file() and ".cache" not in p.parts and p.suffix in {".xml", ".bin", ".onnx", ".yaml", ".json", ".npz"})
     backend = {name: signature((APP / "batch" / name).read_text(encoding="utf-8"))
-               for name in ("asr.py", "worker.py", "media.py", "uvr.py", "uvr_child.py", "diarization.py", "diarize_child.py", "setup_model.py")}
+               for name in ("asr.py", "worker.py", "media.py", "uvr.py", "uvr_child.py", "uvr_recovery.py",
+                            "uvr_timeline.py", "diarization.py", "diarize_child.py", "setup_model.py")}
     return signature({"format": 1, "settings": {key: config.get(key) for key in KEYS},
                       "files": stamps, "versions": versions if versions is not None else environment_versions(config),
                       "backend": backend})

@@ -202,24 +202,27 @@ def validate_pcm(path):
 
 
 def decode(source, work, config, track, progress):
+    from .uvr_timeline import clock_filters, clock_metadata
     work, source = local_path(work), input_file(source)
     source_hash = digest(source)
-    key = signature({"source": source_hash, "track": track, "rate": RATE, "decoder": "mono-rematrix-v1"})
-    marker, pcm = child_path(work, "pcm.json"), child_path(work, "audio.f32le")
-    saved = read_json(marker)
-    if saved and saved.get("signature") == key and pcm.is_file() and pcm.stat().st_size == saved["bytes"] and digest(pcm) == saved.get("sha256"):
-        return pcm, saved["duration"], key
     data = probe(source, config)
     streams = [s for s in data["streams"] if s.get("codec_type") == "audio"]
     if track < 0 or track >= len(streams):
         raise MediaError(f"Wybrano ścieżkę audio {track + 1}, dostępnych: {len(streams)}.")
+    clock = clock_metadata(source, config, track, data)
+    decoder = "video-clock-v2" if clock["has_video"] else "mono-rematrix-v1"
+    key = signature({"source": source_hash, "track": track, "rate": RATE, "decoder": decoder})
+    marker, pcm = child_path(work, "pcm.json"), child_path(work, "audio.f32le")
+    saved = read_json(marker)
+    if saved and saved.get("signature") == key and pcm.is_file() and pcm.stat().st_size == saved["bytes"] and digest(pcm) == saved.get("sha256"):
+        return pcm, saved["duration"], key
     duration = float(data.get("format", {}).get("duration") or streams[track].get("duration") or 0)
     check_disk(work, duration * RATE * 4, config["min_free_gb"])
     temporary = output_file(child_path(work, "audio.f32le.partial"))
     error_file = output_file(child_path(work, "ffmpeg.log"))
     command = [media_tool(config["ffmpeg"], "ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-y",
-        "-protocol_whitelist", "file,pipe", "-i", str(source), "-map", f"0:a:{track}",
-        "-vn", "-sn", "-dn", "-ac", "1", "-af", "aresample=rematrix_maxval=1.0",
+        "-copyts", "-protocol_whitelist", "file,pipe", "-i", str(source), "-map", f"0:a:{track}",
+        "-vn", "-sn", "-dn", "-ac", "1", "-af", clock_filters(clock, RATE),
         "-ar", str(RATE), "-c:a", "pcm_f32le", "-f", "f32le",
         "-progress", "pipe:1", str(temporary)]
     with error_file.open("wb") as errors:
@@ -234,9 +237,26 @@ def decode(source, work, config, track, progress):
     size = temporary.stat().st_size
     if not size or size % 4:
         raise MediaError("Brak poprawnych próbek audio.")
+    pad_verified_tail(temporary, clock, config, work)
+    size = temporary.stat().st_size
     validate_pcm(temporary)
     os.replace(temporary, pcm)
     duration = size / 4 / RATE
     atomic_json(marker, {"signature": key, "bytes": size, "duration": duration,
                          "source_sha256": source_hash, "track": track, "sha256": digest(pcm)})
     return pcm, duration, key
+
+
+def pad_verified_tail(path, clock, config, work):
+    """Only a successful decoder EOF proves there is no more source audio."""
+    needed = round((clock["video_duration"] or 0) * RATE) * 4 - path.stat().st_size
+    if needed <= 0:
+        return
+    check_disk(work, needed, config["min_free_gb"])
+    with path.open("ab") as writer:
+        while needed:
+            count = min(needed, RATE * 4 * 60)
+            writer.write(bytes(count))
+            needed -= count
+        writer.flush()
+        os.fsync(writer.fileno())

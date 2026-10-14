@@ -273,13 +273,16 @@ class DiarizationRegressionTests(unittest.TestCase):
     def test_restart_reuses_completed_diarization_blocks(self):
         from batch.diarize_child import run
         with tempfile.TemporaryDirectory() as folder:
-            request = {"work": folder, "duration": 25, "signature": "recording"}
+            pcm = Path(folder) / "audio.f32le"
+            pcm.write_bytes(bytes(25 * 16000 * 4))
+            request = {"work": folder, "pcm": str(pcm), "duration": 25, "signature": "recording"}
             calls = []
             class FakeDiarizer:
                 def __init__(self, selected):
                     self.work = Path(selected["work"])
                     self.config = {"diar_seconds": 10, "diar_context": 1}
                     self.base = "same-model-and-input"
+                    self.legacy_base = "legacy-model-and-input"
                 def block_result(self, block, key, count):
                     calls.append(block["index"])
                     if len(calls) == 2:

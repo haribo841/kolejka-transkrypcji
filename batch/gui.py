@@ -50,6 +50,7 @@ class QueueWindow:
         self.busy_import = self.readiness_busy = self.metadata_busy = self.closing = False
         self.start_pending = self.launch_kind = self.launch_process = None
         self.launch_deadline = 0
+        self.start_scope_ids = None
         self.pending_filter = self.refresh_after = self.events_after = self.navigation_after = None
         self.setup_dialog = self.youtube_dialog = self.guide_dialog = None
         self.readiness, self.readiness_key = {}, None
@@ -422,10 +423,11 @@ class QueueWindow:
             starting = self.start_pending == kind or (waiting and not active and self.launch_kind == kind)
             running = active and scope in {kind, "all"}
             pending = any(job["kind"] == kind and job["enabled"] and
-                          (job["status"] in {"pending", "blocked", "running"} or
+                          (job["status"] in {"pending", "partial", "blocked", "running"} or
                            (job["status"] == "error" and job["stage"] == "Wymaga działania")) for job in self.jobs.values())
             button.show_session(active=running, starting=starting, stopping=running and bool(control["stop"]),
                                 enabled=pending and not alive and not self.busy_import and not self.start_pending and not waiting)
+        self.local_tab.update_start_controls(control, alive, waiting)
 
     def show_current(self, control, alive, job, scope):
         if alive and scope == "local":
@@ -575,6 +577,7 @@ class QueueWindow:
         if self.start_in_progress():
             return
         self.start_pending = kind
+        self.start_scope_ids = job_ids
         self.update_session_controls()
         self.window.update_idletasks()
         try:
@@ -586,7 +589,7 @@ class QueueWindow:
                     messagebox.showinfo("Start", "Zaznacz materiały do przetworzenia.", parent=self.window)
                     return
             pending = [job for job in self.store.jobs() if job["kind"] == kind and job["enabled"]
-                       and (job["status"] in {"pending", "blocked", "running"}
+                       and (job["status"] in {"pending", "partial", "blocked", "running"}
                             or (job["status"] == "error" and job["stage"] == "Wymaga działania"))
                        and (job_ids is None or job["id"] in job_ids)]
             if not pending:

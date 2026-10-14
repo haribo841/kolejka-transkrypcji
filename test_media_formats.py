@@ -73,7 +73,11 @@ class MediaFormatTests(unittest.TestCase):
                 samples = np.fromfile(pcm, dtype="<f4")
                 self.assertTrue(np.isfinite(samples).all())
                 self.assertGreater(float(np.max(np.abs(samples))), .01)
-                self.assertAlmostEqual(duration, 1, delta=.1)
+                if metadata["has_video"]:
+                    # Video time includes verified silence after source audio EOF.
+                    self.assertAlmostEqual(duration, metadata["duration"], delta=.04)
+                else:
+                    self.assertAlmostEqual(duration, 1, delta=.1)
                 before = pcm.stat().st_mtime_ns
                 self.assertEqual(decode(source, work, self.config, 0, lambda *args: None), (pcm, duration, key))
                 self.assertEqual(pcm.stat().st_mtime_ns, before)
@@ -130,7 +134,7 @@ class MediaFormatTests(unittest.TestCase):
             summary = import_local(store, [silent_video, corrupt, self.inputs["mkv"]], config=self.config,
                                    output_mode="beside")
             self.assertEqual((summary["added"], summary["errors"]), (3, 2))
-            self.assertEqual(sorted(j["status"] for j in store.jobs()), ["error", "error", "pending"])
+            self.assertEqual(sorted(j["status"] for j in store.jobs()), ["error", "no_audio", "pending"])
             self.assertTrue(all(j["error"] for j in store.jobs() if j["status"] == "error"))
             before = store.jobs()
             import_local(store, [self.inputs["mkv"]], config=self.config, output_mode="central")

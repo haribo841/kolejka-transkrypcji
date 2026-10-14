@@ -17,8 +17,9 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["DO_NOT_TRACK"] = "1"
 os.environ["OTEL_SDK_DISABLED"] = "true"
 
-from .asr import checkpoint, pcm_samples, valid_checkpoint
-from .common import RATE, atomic_json, blocks, digest, read_json, signature
+from .asr import checkpoint, pcm_samples, pcm_block_digest, cached_audio_block
+from .common import RATE, ResourceError, atomic_json, blocks, digest, read_json, signature
+from .failures import resource_failure
 
 
 def emit(message, percent=0):
@@ -56,7 +57,10 @@ def load_pipeline(model):
 def prepare_pipeline(model, pcm, work):
     import numpy as np
     import torch
-    pipeline, threshold = load_pipeline(model)
+    try:
+        pipeline, threshold = load_pipeline(model)
+    except Exception as error:
+        raise ResourceError("Nie można uruchomić modelu mówców: " + str(error)) from error
     device = gpu_probe()
     pipeline.to(torch.device(device["device"]))
     if device["device"] == "cuda":
@@ -101,8 +105,10 @@ class Diarizer:
         self.config = request["config"]
         self.model, self.work = Path(self.config["diar_model"]), Path(request["work"])
         self.versions = {name: importlib.metadata.version(name) for name in ("pyannote.audio", "torch", "torchaudio")}
-        self.base = signature({"pcm": request["pcm_key"], "revision": self.config["diar_revision"],
-                               "config": digest(self.model / "config.yaml"), "versions": self.versions, "version": 1})
+        parameters = {"revision": self.config["diar_revision"],
+                      "config": digest(self.model / "config.yaml"), "versions": self.versions, "version": 1}
+        self.legacy_base = signature({"pcm": request["pcm_key"], **parameters})
+        self.base = signature({**parameters, "version": 2})
         self.pipeline, self.device, self.threshold = None, None, None
 
     def inference(self, waveform, hook):
@@ -143,11 +149,13 @@ def run(request):
     jobs = list(blocks(request["duration"], config["diar_seconds"], config["diar_context"]))
     output = []
     for block in jobs:
-        key = signature({"base": diarizer.base, "block": block})
+        audio_hash = pcm_block_digest(request["pcm"], block)
+        key = signature({"base": diarizer.base, "block": block, "audio": audio_hash})
         path = diarizer.work / "diar" / f"{block['index']:06}.json"
-        part = valid_checkpoint(path, key)
+        part = cached_audio_block(path, key, signature({"base": diarizer.legacy_base, "block": block}), audio_hash)
         if part is None:
             part = diarizer.block_result(block, key, len(jobs))
+            part["audio_sha256"] = audio_hash
             checkpoint(path, part)
         output.append(part)
         emit(f"Mówcy: zapisano {block['index'] + 1}/{len(jobs)} bloków", (block["index"] + 1) / len(jobs) * 100)
@@ -170,6 +178,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(json.dumps({"error": str(exc)}, ensure_ascii=False), flush=True)
+        print(json.dumps({"error": str(exc), "scope": "session" if resource_failure(exc) else "job"}, ensure_ascii=False), flush=True)
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)

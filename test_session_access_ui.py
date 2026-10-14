@@ -105,6 +105,44 @@ class SessionAccessUITests(unittest.TestCase):
         self.assertTrue(button.instate(["!disabled", "!pressed"]))
         self.assertEqual(button.cget("background"), "#1465a3")
 
+    def test_selected_start_is_latched_and_session_scope_is_visible(self):
+        self.app.local_tab.render()
+        ident = next(iter(self.app.jobs))
+        self.app.local_tab.tree.selection_set(str(ident))
+        self.app.local_tab.show_detail()
+        button = self.app.local_tab.controls["start_selected"]
+        self.assertEqual(button.cget("text"), "Start zaznaczonych (1)")
+        process = Mock()
+        process.poll.return_value = None
+        with patch("batch.gui.preflight"), patch("batch.gui.check_destination"), patch("batch.gui.launch", return_value=process) as launch:
+            button.invoke()
+            launch.assert_called_once_with(self.root, kind="local", job_ids=[ident])
+            self.assertTrue(button.instate(["disabled", "pressed"]))
+            self.assertTrue(self.app.local_tab.controls["start"].instate(["disabled", "!pressed"]))
+        lock = WorkerLock(self.root)
+        self.assertTrue(lock.acquire())
+        try:
+            self.app.store.control(state="running", scope_kind="local", scope_ids=[ident], stop=0)
+            self.app.update_session_controls()
+            self.assertIn("Zakres sesji: zaznaczone (1)", self.app.local_tab.scope_summary.get())
+            self.assertTrue(button.instate(["disabled", "pressed"]))
+        finally:
+            lock.close()
+
+    def test_partial_detail_explains_preserved_and_missing_time_with_actions(self):
+        ident = next(iter(self.app.jobs))
+        self.app.store.record_failure(ident, "UVR tail", "uvr_truncated", partial=True, processed_until=7)
+        self.app.jobs = {job["id"]: job for job in self.app.store.jobs()}
+        tab = self.app.local_tab
+        tab.render()
+        tab.tree.selection_set(str(ident))
+        tab.show_detail()
+        self.assertIn("Zachowano do 00:00:07 z 00:00:20", tab.detail.get())
+        self.assertIn("Pozostało: 00:00:13", tab.detail.get())
+        self.assertTrue(tab.controls["resume"].instate(["!disabled"]))
+        self.assertTrue(tab.controls["partial_txt"].instate(["!disabled"]))
+        self.assertTrue(tab.controls["error_log"].instate(["!disabled"]))
+
     def test_start_latches_immediately_and_repeated_clicks_cannot_launch_again(self):
         process = Mock()
         process.poll.return_value = None

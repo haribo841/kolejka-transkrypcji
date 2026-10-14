@@ -21,6 +21,7 @@ from .result_paths import assert_output_owner, reserve_output
 from .media import MediaError, decode, download, media_metadata
 from .speakers import assign_words, cues_from_words, merge_speakers
 from .store import Store, in_scope, now, scope_kind
+from .failures import JobError, resource_failure
 from .uvr import archive_source, separate, validate_uvr
 from .youtube_access import preferences as youtube_preferences
 
@@ -66,6 +67,9 @@ def cleanup(work, job):
     # Once the complete vocal file and exports are verified, per-block FLACs
     # are disposable. Their manifests remain as processing evidence.
     for path in (work / "uvr").glob("*.flac"):
+        remove_work_file(path, work)
+    remove_work_file(work / "uvr" / "audio.f32", work)
+    for path in (work / "uvr" / "biezacy").glob("*.wav"):
         remove_work_file(path, work)
 
 
@@ -118,10 +122,13 @@ class Worker:
             archived = archive_source(source, folder, job["audio_track"], config)
             retained.append(str(archived.relative_to(folder)))
         if config.get("uvr_enabled"):
-            source, uvr_report = separate(source, work, folder, job["audio_track"], config, self.progress)
+            source, uvr_report = separate(source, work, folder, job["audio_track"], config, self.progress,
+                                          recovery_only=job.get("processed_until", 0) > 0)
             retained.append(str(source.relative_to(folder)))
         pcm, duration, pcm_key = decode(source, work, config, 0 if config.get("uvr_enabled") else job["audio_track"], self.progress)
-        self.store.update(job["id"], duration=duration)
+        full_duration = uvr_report.get("duration", duration) if uvr_report else duration
+        complete = uvr_report.get("complete", True) if uvr_report else True
+        self.store.update(job["id"], duration=full_duration)
         asr = self.asr.run(pcm, duration, pcm_key, job, work, self.progress)
         if config["diarization"]:
             diar_parts = run_diarization(pcm, duration, pcm_key, work, config, self.progress)
@@ -133,7 +140,7 @@ class Worker:
             words = [{**word, "speaker": "Mówca nieustalony", "overlap": []} for word in asr["words"]]
         report = {"schema": 1, "identity": job["identity"], "title": job["title"],
                   "source": job["source"], "source_metadata": json.loads(job["source_meta"]),
-                  "created": now(), "duration": duration, "language": job["language"],
+                  "created": now(), "duration": full_duration, "processed_until": duration, "language": job["language"],
                   "sample_rate": 16000, "audio_track": job["audio_track"],
                   "settings": config, "asr": asr, "diarization": diar, "uvr": uvr_report,
                   "retained_audio": retained,
@@ -144,14 +151,46 @@ class Worker:
                   "review_warnings": [{"start": w["start"], "end": w["end"], "text": w["text"],
                                        "reason": "Słowo o nietypowo długim przedziale; sprawdź timestamp."}
                                       for w in words if w["end"] - w["start"] > 5]}
+        self.finish(job, folder, work, report, execution, complete)
+
+    def finish(self, job, folder, work, report, execution, complete):
+        duration, full_duration = report["processed_until"], report["duration"]
         self.progress("Atomowy zapis i sprawdzanie TXT, SRT, VTT, JSON", 0)
+        if not complete:
+            failure = report["uvr"].get("failure", {})
+            report["incomplete_reason"] = failure
+            report["missing_intervals"] = [{"start": duration, "end": full_duration}]
+            export(folder, report, execution, complete=False)
+            self.store.record_failure(job["id"], failure.get("message", "UVR: pozostała brakująca część."),
+                                      failure.get("code", "uvr_partial"), partial=True, processed_until=duration)
+            self.store.update(job["id"], progress=duration / full_duration * 100)
+            self.save_error_log(job, failure.get("message", "Niepełny wokal UVR."))
+            return
         export(folder, report, execution)
-        self.store.update(job["id"], status="done", stage="Gotowe", progress=100, error="")
+        self.store.update(job["id"], status="done", stage="Gotowe", progress=100, error="", error_code="", processed_until=duration)
         try:
             cleanup(work, job)
         except OSError as exc:
             # Outputs are valid. Keep evidence of cleanup failure, retry next start.
             self.store.update(job["id"], error="Wyniki gotowe; sprzątanie wymaga ponowienia: " + str(exc))
+
+    def save_error_log(self, job, message):
+        folder = job_folder(self.root, job) / "robocze"
+        folder.mkdir(parents=True, exist_ok=True)
+        from .common import atomic_bytes
+        atomic_bytes(folder / "blad.txt", (now() + "\n" + message + "\n").encode("utf-8"))
+
+    def failure(self, job, error, code, *, stop=False, status=None):
+        logging.exception("Błąd nagrania %s", job["id"])
+        self.store.record_failure(job["id"], str(error)[:2500], code)
+        if status is not None:
+            self.store.update(job["id"], status=status, stage="Zatrzymano etap")
+        try:
+            self.save_error_log(job, str(error))
+        except OSError:
+            logging.exception("Nie udało się zapisać logu nagrania %s", job["id"])
+        if stop:
+            self.store.control(stop=1, message=str(error))
 
     def validate_audio(self, job, source):
         metadata = media_metadata(source, self.config)
@@ -191,28 +230,26 @@ class Worker:
         try:
             self.processor(job)
         except MediaError as exc:
-            self.store.update(job["id"], status=exc.status, error=str(exc), stage="Zatrzymano etap")
-            if exc.status == "blocked":
-                self.store.control(stop=1, message="Kolejka wstrzymana. " + str(exc))
+            self.failure(job, exc, "media_" + exc.status, stop=exc.status == "blocked", status=exc.status)
+        except JobError as exc:
+            self.failure(job, exc, exc.code)
         except ResourceError as exc:
-            self.store.update(job["id"], status="error", error=str(exc), stage="Wymaga działania")
-            self.store.control(stop=1, message=str(exc))
+            self.failure(job, exc, "resource_unavailable", stop=True)
         except Exception as exc:
-            logging.exception("Błąd zadania %s", job["identity"])
-            self.store.update(job["id"], status="error", error=str(exc)[:2500], stage="Błąd")
-            if isinstance(exc, (MemoryError, OSError)):
-                self.store.control(stop=1, message=str(exc))
+            self.failure(job, exc, "processing_failed", stop=resource_failure(exc))
         finally:
             self.store.control(current_id=None)
             self.current = None
 
     def consume(self, max_jobs):
         processed = 0
+        attempted = set()
         with windows_sleep_guard():
             while max_jobs is None or processed < max_jobs:
-                job = self.store.claim()
+                job = self.store.claim(excluded=attempted)
                 if job is None:
                     break
+                attempted.add(job["id"])
                 self.process_one(job)
                 processed += 1
 
@@ -239,7 +276,7 @@ class Worker:
             heartbeat_stop.set()
             if thread.is_alive():
                 thread.join(timeout=6)
-            self.store.control(state="idle", pid=None, heartbeat=now(), current_id=None)
+            self.store.control(state="idle", stop=1, pid=None, heartbeat=now(), current_id=None)
             lock.close()
         return True
 

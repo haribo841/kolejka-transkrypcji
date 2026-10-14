@@ -7,7 +7,7 @@ A Windows desktop application built with Python and Tkinter/ttk for processing Y
 ## Features
 
 - Import a YouTube catalog from XLSX, individual local files, or folders with subfolders. Repeated imports recognize duplicate content and preserve progress.
-- Separate YouTube and local queue tabs. Each tab starts only its own recordings; an optional selection filter limits a session without disabling other jobs.
+- Separate YouTube and local queue tabs. Local Start processes every enabled recording; a separate selected-jobs button limits a session without disabling other jobs.
 - Jump to the current recording or the first enabled pending job. Lists show duration and retain scrolling and selection during refreshes.
 - A configuration tab with background checks and a dated sample test of up to 60 seconds using the current vocal separation and speaker settings.
 - Choose where local results are saved: a dedicated subfolder beside the source, the central results directory, or a custom directory. Existing jobs retain their destinations.
@@ -64,9 +64,13 @@ The interface is currently in Polish. These are the main controls:
 | Import from the entered folder path | Dodaj z podanej ścieżki |
 | Start or resume the YouTube queue | Start/Wznów |
 | Start or resume the local queue | Start/Wznów lokalne |
+| Start selected local jobs | Start zaznaczonych (N) |
+| Resume a missing tail | Wznów brakującą część |
+| Open verified partial text | Otwórz częściowy TXT |
+| Open a recording's error log | Otwórz log błędu |
 | Finish the current recording, then stop | Dokończ bieżący i zatrzymaj |
 | Retry failed jobs | Ponów nieudane |
-| Process selected jobs only | Start tylko zaznaczonych |
+| Process selected YouTube jobs only | Start tylko zaznaczonych |
 | Configure YouTube access | Dostęp YouTube |
 
 ## Data directory
@@ -84,13 +88,25 @@ Existing databases and results are not moved automatically. To reuse a data dire
 
 The folder picker imports recordings as soon as you confirm the selected folder. To scan a pasted or saved path, use the adjacent import button or press Enter in the path field. You can also add individual files. `Uruchom-kolejke-lokalna.vbs` opens the local queue with the last selected folder.
 
-The subfolder and M4A-only options determine which files are included. After import, the list immediately shows and selects the matching jobs, including existing ones. The summary reports new jobs, duplicates, their statuses, and any read errors. An empty scan shows an explicit message. Files with the same SHA-256 share one queue entry, even if their names differ. Reimporting does not reset completed work or failed jobs; use the retry control for failures, then start the queue manually.
+The subfolder option scans every level when you next add a folder. Changing it alone does not import files. M4A-only limits that scan to M4A; otherwise it includes all supported audio and video formats. Scanning skips the application's result folders, symbolic links, and junctions, and reports inaccessible directories. Confirmed Python environments, installed package directories and textual TypeScript, CMake and Qt `.ts` files are excluded by default. **Pliki techniczne** includes them on the next scan; explicitly adding an individual file also allows an intentional test recording. MPEG transport streams remain supported.
+
+After import, the list immediately shows and selects the matching jobs, including existing ones. The summary distinguishes file paths, new unique recordings, existing jobs and duplicate copies. It reports separate causes for media validation, output paths and access failures; **Raport importu** opens the complete JSON report. An empty scan shows an explicit message. Files with the same SHA-256 share one queue entry, even if their names differ. Reimporting does not reset completed work or failed jobs; retry repairable failures and start the queue manually. Files confirmed to contain no audio remain **Bez ścieżki audio** and require a different source, rather than repeated processing.
 
 See the [folder import and UVR timing fixes (Polish)](docs/NAPRAWA-2026-10-11.md) for the regression cases and local validation.
 
 Choose an output destination before importing. By default, each new recording receives a separate subfolder beside its source, with a short title and stable ID. You can change the destination of selected jobs that have not started. Completed or partially processed results are not moved. FFmpeg handles audio and video, including WAV, MP3, M4A/AAC, FLAC, OGG/Opus, MKV, MP4, WebM, MOV, and AVI. Files without audio, damaged files, and decoding failures receive a specific error.
 
+New folder and export names share a Windows path budget. Longer source directories shorten the title portion while keeping the recording ID, partial marker and export version; existing filenames remain unchanged. If a destination is still too long, the recording stays visible as **Wybierz miejsce wyników**. Select a shorter central or custom destination and apply **Zmień miejsce wyników**. Processing does not start until the destination is valid. A deep duplicate of an existing recording keeps the original job's output location without requiring a new destination.
+
 Starting the local queue does not start YouTube jobs. If another session is active, finish its current recording and stop it before switching queues. Resuming reuses the existing checkpoints and results; closing the window leaves the worker running. Vocal separation and audio retention settings are shared by both queues.
+
+**Start/Wznów lokalne** includes all enabled local jobs, regardless of the table selection. **Start zaznaczonych (N)** includes only the selection. The session banner shows its scope and remaining recordings. A completed job, file error, or partial result advances to the next recording. Missing shared models, exhausted memory, insufficient disk space, and a user stop request pause the session.
+
+UVR uses the selected audio track's sample positions on the video clock. A successfully decoded source track that ends before the video is padded with silence; missing model output is never stretched or silently replaced with silence. If UVR truncates vocals, valid blocks and a verified prefix are retained, followed by one recovery pass over the missing tail in 60-second blocks with the normal context overlap.
+
+If recovery still fails, the valid vocal prefix is transcribed and exported as **Częściowo gotowe**. Partial TXT, SRT, VTT, and JSON filenames include `_czesciowa`; their JSON and `czesciowe.json` marker identify the full duration, processed boundary, and error. `gotowe.json` is reserved for verified complete exports. Audio and checkpoints stay available. Every later Start attempts each enabled partial recording once, then continues to the next job if it fails again. Unchanged ASR and diarization blocks are reused by audio content; extending a tail only recomputes new blocks and affected context boundaries. Recordings with no usable vocal prefix remain errors.
+
+See the [recovery implementation and local validation notes](docs/RECOVERY-2026-10-13.md).
 
 To open the local tab with a chosen folder, without importing or starting processing:
 

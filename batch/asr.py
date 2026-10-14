@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.metadata
 from contextlib import contextmanager
 import math
+import hashlib
 from pathlib import Path
 import re
 import time
@@ -18,13 +19,39 @@ def valid_checkpoint(path, key):
             unsigned = {k: v for k, v in data.items() if k != "checksum"}
             if expected == signature(unsigned):
                 return data
-    except (ValueError, OSError):
+    except (ValueError, OSError, TypeError, AttributeError):
         pass
     return None
 
 
 def checkpoint(path, data):
     atomic_json(path, {**data, "checksum": signature(data)})
+
+
+def pcm_block_digest(pcm, block):
+    left = round(block["start"] * RATE) * 4
+    remaining = (round(block["end"] * RATE) - round(block["start"] * RATE)) * 4
+    result = hashlib.sha256()
+    with Path(pcm).open("rb") as reader:
+        reader.seek(left)
+        while remaining:
+            data = reader.read(min(1024 * 1024, remaining))
+            if not data:
+                raise RuntimeError("Niekompletny blok PCM. Zachowano wcześniejsze punkty kontrolne.")
+            result.update(data)
+            remaining -= len(data)
+    return result.hexdigest()
+
+
+def cached_audio_block(path, key, legacy_key, audio_hash):
+    part = valid_checkpoint(path, key)
+    if part is None:
+        part = valid_checkpoint(path, legacy_key)
+        if part is not None:
+            part = {**part, "signature": key, "audio_sha256": audio_hash}
+            part.pop("checksum", None)
+            checkpoint(path, part)
+    return part
 
 
 def word_key(text):
@@ -108,9 +135,9 @@ class ASR:
     def load(self):
         if self.pipe is None:
             from transcribe import validate_model
-            validate_model(Path(self.config["model"]))
-            import openvino_genai as genai
             try:
+                validate_model(Path(self.config["model"]))
+                import openvino_genai as genai
                 self.pipe = genai.WhisperPipeline(self.config["model"], self.config["device"],
                     CACHE_DIR=str(self.root / "cache" / "openvino"), word_timestamps=True)
             except Exception as exc:
@@ -151,18 +178,22 @@ class ASR:
         if config.get("hotwords"):
             generation["hotwords"] = config["hotwords"]
         versions = {name: importlib.metadata.version(name) for name in ("openvino", "openvino-genai", "numpy")}
-        base = signature({"pcm": pcm_key, "model": config["model"],
+        parameters = {"model": config["model"],
                           "revision": config["model_revision"], "generation": generation,
-                          "versions": versions, "join_version": 2})
+                          "versions": versions, "join_version": 2}
+        legacy_base = signature({"pcm": pcm_key, **parameters})
+        base = signature({**parameters, "join_version": 3})
         parts = []
         jobs = list(blocks(duration, config["asr_seconds"], config["asr_context"]))
         for block in jobs:
-            key = signature({"base": base, "block": block})
+            audio_hash = pcm_block_digest(pcm, block)
+            key = signature({"base": base, "block": block, "audio": audio_hash})
             path = Path(work) / "asr" / f"{block['index']:06}.json"
-            part = valid_checkpoint(path, key)
+            part = cached_audio_block(path, key, signature({"base": legacy_base, "block": block}), audio_hash)
             if part is None:
                 progress(f"Whisper: blok {block['index'] + 1}/{len(jobs)} (CPU)", block["index"] / len(jobs) * 100)
                 part = self.run_block(pcm, block, key, generation, job["language"], versions)
+                part["audio_sha256"] = audio_hash
                 checkpoint(path, part)
             parts.append(part)
             progress(f"Whisper: zapisano {block['index'] + 1}/{len(jobs)} bloków", (block["index"] + 1) / len(jobs) * 100)

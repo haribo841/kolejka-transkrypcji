@@ -5,10 +5,13 @@ from collections import Counter
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+import json
+import os
 
 from .common import WorkerLock, atomic_json, job_folder, read_json
 from .importers import MEDIA, import_local
-from .store import RETRYABLE, STATUSES
+from .import_report import import_note
+from .store import RETRYABLE, STATUSES, now
 from .ui_help import (HELP, Tooltip, collapsible_help, duration_text, help_button,
                       status_tags, sync_tree, wrap_with_parent)
 from .local_outputs import OUTPUT_MODES, scan_media
@@ -17,9 +20,10 @@ from .session_button import SessionButton
 ENABLED_STATE = "!disabled"
 
 
-def folder_media(folder, recursive=True, m4a_only=False, excluded=()):
+def folder_media(folder, recursive=True, m4a_only=False, excluded=(), *, progress=lambda message: None,
+                 include_technical=False):
     extensions = {".m4a"} if m4a_only else MEDIA
-    return scan_media(folder, extensions, recursive, excluded)
+    return scan_media(folder, extensions, recursive, excluded, progress=progress, include_technical=include_technical)
 
 
 class LocalQueueTab:
@@ -31,13 +35,17 @@ class LocalQueueTab:
         self.folder = tk.StringVar(master=parent, value=state.get("folder", ""))
         self.recursive = tk.BooleanVar(master=parent, value=state.get("recursive", True))
         self.m4a_only = tk.BooleanVar(master=parent, value=state.get("m4a_only", False))
+        self.include_technical = tk.BooleanVar(master=parent, value=state.get("include_technical", False))
         self.output_mode = tk.StringVar(master=parent, value=OUTPUT_MODES.get(state.get("output_mode", "beside"), OUTPUT_MODES["beside"]))
         self.output_folder = tk.StringVar(master=parent, value=state.get("output_folder", ""))
         self.search = tk.StringVar(master=parent)
         self.status = tk.StringVar(master=parent, value="Wszystkie")
-        self.selected_only = tk.BooleanVar(master=parent, value=False)
         self.note = tk.StringVar(master=parent, value="Dodaj folder... wybiera folder i dodaje jego nagrania do listy. Transkrypcję uruchamiasz osobno przyciskiem Start.")
+        last_import = read_json(app.root / "ostatni-import-lokalny.json", {})
+        if last_import.get("files") is not None:
+            self.note.set(import_note(last_import))
         self.counts, self.current, self.detail = (tk.StringVar(master=parent) for _ in range(3))
+        self.scope_summary = tk.StringVar(master=parent)
         self.hint = tk.StringVar(master=parent, value="Start obejmuje tylko pliki lokalne. Miejsce wyników zapisujemy osobno dla każdego nagrania.")
         frame = ttk.Frame(parent, padding=12)
         frame.pack(fill="both", expand=True)
@@ -47,6 +55,7 @@ class LocalQueueTab:
                 ("next", "Bieżący / następny", lambda: app.jump_to_next("local"), HELP["next"]),
                 ("configuration", "Konfiguracja", app.open_configuration, HELP["configuration"]),
                 ("test", "Sprawdź na fragmencie", app.test_local, HELP["test"]),
+                ("import_report", "Raport importu", self.open_import_report, "Otwiera pełny raport ostatniego importu: pominięte źródła, duplikaty i przyczyny problemów."),
                 ("csv", "Raport CSV", lambda: app.report(kind="local"), "Zapisuje raport wyłącznie lokalnych nagrań.")):
             self.button(toolbar, key, text, action, hint).pack(side="left", padx=(0, 8))
         ttk.Label(frame, textvariable=app.local_model_state, wraplength=1200).pack(anchor="w", pady=(0, 6))
@@ -65,10 +74,11 @@ class LocalQueueTab:
         self.button(row, "files", "Dodaj pliki", self.add_files, HELP["files"]).pack(side="left")
         row = ttk.Frame(source)
         row.pack(fill="x", pady=(5, 0))
-        for key, text, variable in (("recursive", "Podfoldery", self.recursive), ("m4a_only", "Tylko M4A", self.m4a_only)):
+        for key, text, variable in (("recursive", "Podfoldery", self.recursive), ("m4a_only", "Tylko M4A", self.m4a_only),
+                                    ("include_technical", "Pliki techniczne", self.include_technical)):
             toggle = ttk.Checkbutton(row, text=text, variable=variable, command=self.save_view)
             toggle.pack(side="left", padx=(0, 12))
-            self.help(toggle, key, "Filtr importu folderu. Domyślnie obsługiwane są wszystkie wymienione formaty audio i wideo.")
+            self.help(toggle, key, self.scan_help(key))
         ttk.Label(row, text="Wyniki nowych nagrań:").pack(side="left", padx=(0, 6))
         mode = ttk.Combobox(row, textvariable=self.output_mode, values=list(OUTPUT_MODES.values()), state="readonly", width=19)
         mode.pack(side="left", padx=(0, 8))
@@ -100,7 +110,7 @@ class LocalQueueTab:
         listing = ttk.Frame(frame)
         listing.pack(fill="both", expand=True)
         columns = ("enabled", "status", "stage", "progress", "duration", "format", "title", "language", "audio")
-        self.tree = ttk.Treeview(listing, columns=columns, show="headings", selectmode="extended", height=12)
+        self.tree = ttk.Treeview(listing, columns=columns, show="headings", selectmode="extended", height=6)
         for column, title, width in zip(columns, ("Kolejka", "Status", "Etap", "Etap %", "Czas trwania", "Format", "Nagranie", "Język", "Audio"),
                                         (55, 125, 185, 55, 100, 65, 530, 60, 50)):
             self.tree.heading(column, text=title)
@@ -113,14 +123,18 @@ class LocalQueueTab:
         horizontal.grid(row=1, column=0, sticky="ew")
         listing.rowconfigure(0, weight=1)
         listing.columnconfigure(0, weight=1)
-        for tag, color in (("done", "#25723b"), ("error", "#ae2020")):
+        for tag, color in (("done", "#25723b"), ("error", "#ae2020"), ("partial", "#916100")):
             self.tree.tag_configure(tag, foreground=color)
         self.tree.bind("<<TreeviewSelect>>", self.show_detail)
         self.tree.bind("<Control-a>", self.select_visible)
         self.tree.bind("<Double-1>", lambda event: app.open_results(self.selected()))
         self.controls["list"] = self.tree
         Tooltip(self.tree, HELP["list"], self.hint, popup=False)
-        selection = ttk.Frame(frame)
+        # Reserve the footer before allocating the remaining height to the table.
+        # Recovery and stop controls must remain reachable at minimum window size.
+        footer = ttk.Frame(frame)
+        footer.pack(side="bottom", fill="x", before=listing)
+        selection = ttk.Frame(footer)
         selection.pack(fill="x", pady=6)
         for key, text, action, hint in (
                 ("select", "Zaznacz widoczne", self.select_visible, HELP["select"]),
@@ -130,34 +144,54 @@ class LocalQueueTab:
                 ("track", "Wybierz ścieżkę audio", lambda: app.audio_track(self.selected()), HELP["track"]),
                 ("output", "Zmień miejsce wyników", self.change_output, "Stosuje wybrany sposób zapisu do zaznaczonych nagrań, które nie rozpoczęły przetwarzania. Gotowych i częściowych wyników nie przenosi.")):
             self.button(selection, key, text, action, hint).pack(side="left", padx=(0, 6))
-        for variable in (self.counts, self.current, self.detail):
-            label = ttk.Label(frame, textvariable=variable, wraplength=1200)
+        for variable in (self.counts, self.scope_summary, self.current, self.detail):
+            label = ttk.Label(footer, textvariable=variable, wraplength=1200)
             label.pack(anchor="w", pady=(0, 3))
             wrap_with_parent(label, 24)
-        self.progress = ttk.Progressbar(frame, maximum=100)
+        self.progress = ttk.Progressbar(footer, maximum=100)
         self.progress.pack(fill="x", pady=(0, 6))
         self.controls["progress"] = self.progress
         Tooltip(self.progress, HELP["progress"], self.hint, popup=False)
-        actions = ttk.Frame(frame)
+        actions = ttk.Frame(footer)
         actions.pack(fill="x")
         for key, text, action, hint in (
-                ("start", "Start/Wznów lokalne", self.start, "Przetwarza tylko lokalną kolejkę."),
-                ("stop", "Dokończ bieżący i zatrzymaj", lambda: app.stop(kind="local"), HELP["stop"]),
+                ("start", "Start/Wznów lokalne", self.start, "Przetwarza wszystkie włączone lokalne nagrania oczekujące i częściowe, niezależnie od zaznaczenia."),
+                ("start_selected", "Start zaznaczonych (0)", self.start_selected, "Przetwarza wyłącznie zaznaczone nagrania. Po ostatnim z nich sesja się kończy."),
+                ("stop", "Dokończ bieżący i zatrzymaj", lambda: app.stop(kind="local"), HELP["stop"])):
+            self.button(actions, key, text, action, hint).pack(side="left", padx=(0, 6))
+        recovery = ttk.Frame(footer)
+        recovery.pack(fill="x", pady=(5, 0))
+        for key, text, action, hint in (
                 ("retry", "Ponów nieudane", lambda: app.retry(kind="local", ids=self.selected()), HELP["retry"]),
+                ("resume", "Wznów brakującą część", self.start_selected, "Uruchamia zaznaczone nagranie od zachowanego punktu. Gotowy początek zostaje wykorzystany."),
+                ("partial_txt", "Otwórz częściowy TXT", self.open_partial, "Otwiera zweryfikowany częściowy wynik zaznaczonego nagrania."),
+                ("error_log", "Otwórz log błędu", self.open_error_log, "Otwiera zapis błędu zaznaczonego nagrania, np. UVR lub FFmpeg."),
                 ("results", "Otwórz wyniki", lambda: app.open_results(self.selected()), HELP["results"]),
                 ("transcript", "Otwórz TXT", lambda: app.open_transcript(self.selected()), HELP["transcript"])):
-            self.button(actions, key, text, action, hint).pack(side="left", padx=(0, 6))
-        selected = ttk.Checkbutton(actions, text="Start tylko zaznaczonych", variable=self.selected_only)
-        selected.pack(side="left")
-        self.help(selected, "selected_only", HELP["selected_only"])
-        collapsible_help(frame, self.hint)
+            self.button(recovery, key, text, action, hint).pack(side="left", padx=(0, 6))
+        collapsible_help(footer, self.hint)
+
+    def open_import_report(self):
+        path = self.app.root / "ostatni-import-lokalny.json"
+        if path.is_file():
+            os.startfile(str(path))
+        else:
+            self.note.set("Raport powstanie po dodaniu folderu lub plików.")
 
     def help(self, widget, key, hint):
         self.controls[key] = widget
         Tooltip(widget, hint, self.hint)
 
+    @staticmethod
+    def scan_help(key):
+        return {
+            "recursive": "Przy następnym dodaniu folderu przeszuka wszystkie poziomy podfolderów. Pomija katalogi wyników, dowiązania i junctions. Sam checkbox nie dodaje plików.",
+            "m4a_only": "Przy następnym dodaniu folderu wybierze tylko M4A. Wyłącz, aby importować pozostałe obsługiwane formaty audio i wideo.",
+            "include_technical": "Domyślnie pomija potwierdzone środowiska i pakiety Pythona oraz tekstowe pliki .ts. Zaznacz, aby uwzględnić je przy następnym skanowaniu. Dodaj pliki pozwala wskazać je pojedynczo."
+        }[key]
+
     def button(self, parent, key, text, command, hint):
-        factory = SessionButton if key == "start" else help_button
+        factory = SessionButton if key in {"start", "start_selected"} else help_button
         button = factory(parent, text, command, hint, self.hint)
         self.controls[key] = button
         return button
@@ -167,6 +201,7 @@ class LocalQueueTab:
             return
         atomic_json(self.app.root / "lokalne-ui.json", {"folder": self.folder.get(),
                     "recursive": self.recursive.get(), "m4a_only": self.m4a_only.get(),
+                    "include_technical": self.include_technical.get(),
                     "output_mode": self.output_policy()[0], "output_folder": self.output_folder.get()})
 
     def output_policy(self):
@@ -227,11 +262,14 @@ class LocalQueueTab:
         if not value:
             return
         recursive, m4a = self.recursive.get(), self.m4a_only.get()
+        include_technical = self.include_technical.get()
         self.save_view()
         excluded = [job_folder(self.app.root, job) for job in self.app.store.jobs()]
         scope = "tylko M4A" if m4a else "audio i wideo"
         scope += ", z podfolderami" if recursive else ", bez podfolderów"
-        self.import_paths(lambda: folder_media(value, recursive, m4a, excluded), folder_scope=scope)
+        notify = lambda message: self.app.events.put(("progress", message, self.note))
+        self.import_paths(lambda: folder_media(value, recursive, m4a, excluded, progress=notify,
+                                              include_technical=include_technical), folder_scope=scope)
 
     def add_files(self):
         paths = filedialog.askopenfilenames(parent=self.app.window, title="Lokalne nagrania do transkrypcji",
@@ -254,17 +292,8 @@ class LocalQueueTab:
             result = import_local(self.app.store, collect(), lambda value: self.app.events.put(("progress", value, self.note)),
                                   config=config, output_mode=mode, output_root=custom)
             result["local_import"] = True
-            result["note"] = (f"Znaleziono: {result['files']} | Dodano: {result['added']} | "
-                              f"Kopie lub już w kolejce: {result['files'] - result['added']} | Błędy odczytu: {result['errors']}. Import zakończony.")
-            if not result["files"] and folder_scope:
-                result["note"] += (f" Nie znaleziono nagrań. Skanowanie: {folder_scope}. "
-                                   "Sprawdź folder oraz opcje Tylko M4A i Podfoldery. Własne katalogi wyników są pomijane.")
-            if result["files"]:
-                statuses = Counter(result["job_statuses"])
-                summary = ", ".join(f"{STATUSES[status]}: {count}" for status, count in sorted(statuses.items()))
-                result["note"] += f" Zaznaczone pozycje: {summary}. Start pozostaje ręczny."
-                if any(status in RETRYABLE for status in statuses):
-                    result["note"] += " Błędy ponawiasz przyciskiem Ponów nieudane; ponowny import nie resetuje postępu."
+            result["note"] = import_note(result, folder_scope)
+            atomic_json(self.app.root / "ostatni-import-lokalny.json", {"at": now(), **result})
             return result
         self.app.background(run, note=self.note)
 
@@ -272,6 +301,8 @@ class LocalQueueTab:
         """Show an import's committed jobs immediately on the Tk main thread."""
         self.search.set("")
         self.status.set("Wszystkie")
+        if result.get("issues"):
+            self.note.set(self.note.get() + " | Raport: " + str(self.app.root / "ostatni-import-lokalny.json"))
         self.app.jobs = {job["id"]: job for job in self.app.store.jobs()}
         self.render()
         added = [str(ident) for ident in result.get("job_ids", []) if self.tree.exists(str(ident))]
@@ -312,9 +343,10 @@ class LocalQueueTab:
             visible_rows.append((item, values, status_tags(job["status"])))
         sync_tree(self.tree, self.visible, visible_rows)
         self.show_detail()
-        counts = Counter(job["status"] for job in rows)
+        technical = sum(bool(json.loads(job["source_meta"]).get("technical_exclusion")) and not job["enabled"] for job in rows)
+        counts = Counter(job["status"] for job in rows if not json.loads(job["source_meta"]).get("technical_exclusion") or job["enabled"])
         pending = sum(job["status"] == "pending" and job["enabled"] for job in rows)
-        self.counts.set(f"Lokalne: {len(rows)} | Gotowe: {counts['done']} | Oczekujące: {counts['pending']} (włączone: {pending}) | Problemy: {sum(counts[s] for s in RETRYABLE)}")
+        self.counts.set(f"Lokalne: {len(rows)} | Gotowe: {counts['done']} | Częściowe: {counts['partial']} | Oczekujące: {counts['pending']} (włączone: {pending}) | Problemy: {sum(counts[s] for s in RETRYABLE if s != 'partial')} | Bez audio: {counts['no_audio']} | Miejsce wyników: {counts['output_required']} | Techniczne wyłączone: {technical}")
 
     def refresh(self, control, alive):
         self.render()
@@ -353,17 +385,105 @@ class LocalQueueTab:
         ids = self.selected()
         if len(ids) == 1 and ids[0] in self.app.jobs:
             job = self.app.jobs[ids[0]]
-            self.detail.set(f"Źródło: {job['source']}\nWyniki: {job_folder(self.app.root, job)}" +
-                            ("\nBłąd: " + job["error"][:600] if job["error"] else ""))
+            self.detail.set(f"Źródło: {job['source']}\nWyniki: {self.result_location(job)}" +
+                            (f"\nZachowano do {duration_text(job['processed_until'])} z {duration_text(job['duration'])}. "
+                             f"Pozostało: {duration_text(max(0, (job['duration'] or 0) - job['processed_until']))}. Brakującą część podejmie następny Start."
+                             if job.get("processed_until") and job['status'] != 'done' else "") +
+                            ("\nOstatni problem: " + job["error"][:600] if job["error"] else "") + self.action_hint(job))
         else:
             self.detail.set(f"Zaznaczono: {len(ids)} | Zaznacz jedno nagranie, aby zobaczyć jego miejsce wyników.")
+        if hasattr(self, "scope_summary") and "start_selected" in self.controls:
+            waiting = WorkerLock.busy(self.app.root / "uruchamianie")
+            self.update_start_controls(self.app.store.control(), WorkerLock.busy(self.app.root), waiting)
+
+    def result_location(self, job):
+        meta = json.loads(job["source_meta"])
+        if meta.get("output_error"):
+            return "Wymagany krótszy folder zamiast: " + str(meta.get("intended_output_root", ""))
+        return str(job_folder(self.app.root, job))
+
+    @staticmethod
+    def action_hint(job):
+        meta = json.loads(job["source_meta"])
+        if meta.get("technical_exclusion") and not job["enabled"]:
+            return "\nPominięto materiał techniczny: " + meta["technical_exclusion"] + ". Możesz świadomie włączyć tę pozycję."
+        if job["status"] == "no_audio":
+            return "\nTen plik nie ma dźwięku. Dodaj nagranie zawierające ścieżkę audio; ponowienie nie naprawi źródła."
+        if meta.get("output_error"):
+            return '\nWybierz Folder centralny lub Wskazany folder, potem kliknij Zmień miejsce wyników dla tej pozycji.'
+        return ""
 
     def start(self):
-        ids = self.selected() if self.selected_only.get() else None
-        if ids == []:
+        self.app.start(kind="local")
+
+    def start_selected(self):
+        ids = self.selected()
+        if not ids:
             messagebox.showinfo("Start lokalnej kolejki", "Zaznacz lokalne nagrania do przetworzenia.", parent=self.app.window)
             return
         self.app.start(kind="local", job_ids=ids)
+
+    def eligible(self, job):
+        return job['kind'] == 'local' and job['enabled'] and (job['status'] in {'pending', 'partial', 'running'} or
+                                                            (job['status'] == 'error' and job['stage'] == 'Wymaga działania'))
+
+    def update_start_controls(self, control, alive, waiting):
+        selected = set(self.selected())
+        count = sum(self.eligible(job) and job['id'] in selected for job in self.app.jobs.values())
+        button = self.controls['start_selected']
+        button.idle_text = f"Start zaznaczonych ({count})"
+        session = alive and control['state'] == 'running' and control.get('scope_kind') == 'local'
+        ids = json.loads(control.get('scope_ids', '[]')) if session else self.app.start_scope_ids
+        starting = self.app.start_pending == 'local' or (waiting and self.app.launch_kind == 'local')
+        scoped = bool(ids)
+        enabled = count > 0 and not alive and not self.app.busy_import and not self.app.start_pending and not waiting
+        button.show_session(active=session and scoped, starting=starting and scoped,
+                            stopping=session and bool(control['stop']), enabled=enabled)
+        main = self.controls['start']
+        if (session or starting) and scoped:
+            main.show_session(enabled=False)
+        self.update_scope_summary(session, ids, count)
+        self.update_recovery_controls(selected, enabled)
+
+    def update_scope_summary(self, session, ids, count):
+        if session:
+            remaining = sum(self.eligible(job) and job['status'] != 'running' and (not ids or job['id'] in ids)
+                            for job in self.app.jobs.values())
+            scope = f"zaznaczone ({len(ids)})" if ids else "wszystkie włączone lokalne"
+            self.scope_summary.set(f"Zakres sesji: {scope} | Pozostało: {remaining}")
+        else:
+            total = sum(self.eligible(job) for job in self.app.jobs.values())
+            self.scope_summary.set(f"Start/Wznów lokalne: wszystkie włączone ({total}) | Start zaznaczonych: {count}")
+
+    def update_recovery_controls(self, selected, enabled):
+        single = len(selected) == 1
+        for key in ('resume', 'partial_txt', 'error_log'):
+            self.controls[key].state(['!disabled'] if single and (key != 'resume' or enabled) else ['disabled'])
+
+    def open_partial(self):
+        from .exporter import verify_outputs
+        ids = self.selected()
+        if len(ids) != 1:
+            return
+        job = self.app.jobs[ids[0]]
+        folder = job_folder(self.app.root, job)
+        if not verify_outputs(folder, job['identity'], partial=True):
+            self.note.set('Brak zweryfikowanego częściowego eksportu. Zachowane bloki zostaną wykorzystane po wznowieniu.')
+            return
+        from .result_paths import output_paths
+        path = output_paths(folder, read_json(folder / 'czesciowe.json'))['txt']
+        os.startfile(str(path))
+
+    def open_error_log(self):
+        ids = self.selected()
+        if len(ids) != 1:
+            return
+        folder = job_folder(self.app.root, self.app.jobs[ids[0]]) / 'robocze'
+        path = next((p for p in (folder / 'blad.txt', folder / 'uvr.log', folder / 'ffmpeg.log', folder / 'pyannote.log') if p.is_file()), None)
+        if path:
+            os.startfile(str(path))
+        else:
+            self.note.set('Brak pliku logu. Szczegóły ostatniego problemu są widoczne pod listą.')
 
     def close(self):
         if self.filter_after:

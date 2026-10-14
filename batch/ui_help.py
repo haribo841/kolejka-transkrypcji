@@ -8,9 +8,9 @@ from tkinter import ttk
 
 def status_tags(status):
     from .store import RETRYABLE
-    if status in {"done", "draft"}:
+    if status in {"done", "draft", "partial"}:
         return [status]
-    if status in RETRYABLE:
+    if status in RETRYABLE or status in {"no_audio", "output_required"}:
         return ["error"]
     return []
 
@@ -58,7 +58,7 @@ def next_job(rows, kind, current_id=None):
     if current:
         return current
     return next((job for job in rows if job["enabled"] and
-                 (job["status"] in {"pending", "blocked", "running"} or
+                 (job["status"] in {"pending", "partial", "blocked", "running"} or
                   (job["status"] == "error" and job["stage"] == "Wymaga działania"))), None)
 
 

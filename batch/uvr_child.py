@@ -9,23 +9,20 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import time
 import traceback
 
 os.environ["DO_NOT_TRACK"] = "1"
-from .asr import checkpoint, valid_checkpoint
-from .common import (NO_WINDOW, WorkerLock, atomic_json, blocks, check_disk, digest,
-                     read_json, remove_work_file, settings, signature)
-from .media import probe
+from .common import (NO_WINDOW, WorkerLock, atomic_json, check_disk, digest,
+                     read_json, settings)
 from .paths import child_path, input_file, local_path, media_tool, output_file, within_root
 from .processes import ChildGuard
+from .failures import resource_failure
 
 
 UVR_STATE_FILE = 'konfiguracja-uvr.json'
 
 UVR_RATE = 44100
 MODEL_ROUNDING_SECONDS = .05
-CONTAINER_TAIL_SECONDS = .25
 
 
 def emit(message, percent=0):
@@ -135,13 +132,11 @@ def vocal_padding(samples, rate, required, prepared, final):
         original = sf.info(prepared)
         if original.samplerate != rate or original.channels != 2 or not original.frames:
             raise RuntimeError("Niepoprawne wejście bloku UVR.")
-        if original.frames - len(samples) > tolerance:
-            raise RuntimeError("UVR skrócił nagranie; nie można zachować timestampów.")
         source_tail = max(0, required - original.frames)
-        if source_tail > tolerance and (not final or source_tail > round(rate * CONTAINER_TAIL_SECONDS)):
+        if source_tail > tolerance and not final:
             raise RuntimeError("Ścieżka audio jest krótsza od planu bloku UVR. Sprawdź wybraną ścieżkę audio.")
     deficit = max(0, required - len(samples))
-    if deficit > tolerance + source_tail:
+    if deficit > source_tail and (prepared is not None or deficit > tolerance):
         raise RuntimeError("UVR skrócił nagranie; nie można zachować timestampów.")
     return deficit
 
@@ -181,53 +176,8 @@ def join_vocal_blocks(output, jobs, block_dir, duration):
 
 
 def run(request):
-    import soundfile as sf
-    config = request["config"]
-    source, work, output = request_paths(request)
-    duration = float(probe(source, config)["format"]["duration"])
-    jobs = list(blocks(duration, config["uvr_seconds"], config["uvr_context"]))
-    block_dir = child_path(work, "uvr")
-    block_dir.mkdir(parents=True, exist_ok=True)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    check_disk(output.parent, duration * UVR_RATE * 2 * 3 * 2, config["min_free_gb"])
-    engine = None
-    parts = []
-    for block in jobs:
-        index = block["index"]
-        key = signature({"request": request["signature"], "block": block})
-        manifest_path = child_path(block_dir, f"{index:06}.json")
-        stem = child_path(block_dir, f"{index:06}.flac")
-        saved = valid_checkpoint(manifest_path, key)
-        if saved and stem.is_file() and digest(stem) == saved["sha256"]:
-            parts.append(saved)
-            emit(f"UVR: odtworzono blok {index + 1}/{len(jobs)}", (index + 1) / len(jobs) * 100)
-            continue
-        emit(f"UVR: separacja bloku {index + 1}/{len(jobs)}", index / len(jobs) * 100)
-        stage = child_path(block_dir, "biezacy")
-        stage.mkdir(exist_ok=True)
-        prepared = prepare_input(source, config, request["track"], stage, block)
-        if engine is None:
-            engine = separator(config, stage)
-        started = time.perf_counter()
-        # Cut context only, no silence removal or time stretching. Sample indexes
-        # are computed from absolute boundaries to prevent accumulated drift.
-        engine, generated = separate_vocal(engine, config, stage, prepared)
-        expected = write_vocal_block(generated, stem, block, prepared=prepared, final=index == len(jobs) - 1)
-        prepared_frames, vocal_frames = sf.info(prepared).frames, sf.info(generated).frames
-        required = round(block["core_end"] * UVR_RATE) - round(block["start"] * UVR_RATE)
-        saved = {"signature": key, "block": block, "frames": expected, "sha256": digest(stem),
-                 "device": str(engine.torch_device), "seconds": time.perf_counter() - started,
-                 "prepared_frames": prepared_frames, "vocal_frames": vocal_frames,
-                 "tail_padding_frames": max(0, required - vocal_frames)}
-        checkpoint(manifest_path, saved)
-        parts.append(saved)
-        remove_work_file(prepared, work)
-        remove_work_file(generated, work)
-        emit(f"UVR: zapisano blok {index + 1}/{len(jobs)}", (index + 1) / len(jobs) * 100)
-    join_vocal_blocks(output, jobs, block_dir, duration)
-    atomic_json(work / "uvr-result.json", {"signature": request["signature"], "sha256": digest(output),
-                "model": config["uvr_model"], "version": importlib.metadata.version("audio-separator"),
-                "duration": duration, "blocks": parts, "output": str(output)})
+    from .uvr_recovery import VocalRecovery
+    return VocalRecovery(request, sys.modules[__name__]).run()
 
 
 def main():
@@ -245,6 +195,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(json.dumps({"error": str(exc)}, ensure_ascii=False), flush=True)
+        print(json.dumps({"error": str(exc), "code": getattr(exc, "code", "uvr_failed"),
+                          "scope": "session" if resource_failure(exc) else "job"}, ensure_ascii=False), flush=True)
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)

@@ -30,7 +30,7 @@ class VocalTimingTests(unittest.TestCase):
                                        .25, dtype=np.float32), UVR_RATE, subtype="FLOAT")
 
     def test_known_mkv_and_avi_tail_gaps_preserve_core_and_pad_only_the_end(self):
-        for deficit in (2411, 4140):
+        for deficit in (2411, 4140, 12528, 44100):
             with self.subTest(deficit=deficit):
                 self.audio(self.required - deficit)
                 frames = write_vocal_block(self.generated, self.stem, self.block,
@@ -54,11 +54,10 @@ class VocalTimingTests(unittest.TestCase):
             write_vocal_block(self.generated, self.stem, self.block, prepared=self.prepared)
         self.assertFalse(self.stem.exists())
 
-    def test_large_container_mismatch_is_rejected(self):
+    def test_verified_container_tail_has_no_arbitrary_quarter_second_limit(self):
         self.audio(self.required - round(.3 * UVR_RATE))
-        with self.assertRaisesRegex(RuntimeError, "Ścieżka audio jest krótsza"):
-            write_vocal_block(self.generated, self.stem, self.block, prepared=self.prepared, final=True)
-        self.assertFalse(self.stem.exists())
+        write_vocal_block(self.generated, self.stem, self.block, prepared=self.prepared, final=True)
+        self.assertEqual(sf.info(self.stem).frames, 2 * UVR_RATE)
 
     def test_unverified_tail_still_requires_original_input(self):
         self.audio(self.required - 4140)

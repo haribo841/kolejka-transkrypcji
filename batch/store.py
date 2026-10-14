@@ -11,12 +11,13 @@ import sqlite3
 from .common import job_folder, slug
 
 STATUSES = {
-    "pending": "Oczekuje", "running": "Przetwarzanie", "done": "Gotowe",
+    "pending": "Oczekuje", "running": "Przetwarzanie", "done": "Gotowe", "partial": "Częściowo gotowe",
     "error": "Błąd", "unavailable": "Niedostępny", "login_required": "Wymaga logowania",
     "scheduled": "Zaplanowany", "live": "Trwa transmisja", "draft": "Szkic bez linku",
     "blocked": "Blokada YouTube",
+    "no_audio": "Bez ścieżki audio", "output_required": "Wybierz miejsce wyników",
 }
-RETRYABLE = ("error", "unavailable", "login_required", "scheduled", "live", "blocked")
+RETRYABLE = ("error", "partial", "unavailable", "login_required", "scheduled", "live", "blocked")
 SCOPE_KINDS = ("all", "youtube", "local")
 BEGIN_WRITE = "BEGIN IMMEDIATE"
 SELECT_CONTROL = "SELECT * FROM control WHERE id=1"
@@ -61,6 +62,40 @@ def in_scope(job, control):
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def restored_output_state(job, metadata):
+    if job["status"] != "output_required":
+        return job["status"], job["error"], job["error_code"], job["stage"]
+    error = metadata.get("probe_error", "")
+    if not error:
+        return "pending", "", "", ""
+    code = metadata.get("probe_error_code") or "media_probe"
+    status = "no_audio" if code == "no_audio" else "error"
+    return status, error, code, "Walidacja pliku"
+
+
+def resolved_output_history(job):
+    """Keep the cleared current path diagnostic, without repeating old entries."""
+    if job["status"] != "output_required" or not job["error"]:
+        return job["error_history"]
+    history = json.loads(job["error_history"])
+    code = job["error_code"] or "output_path"
+    if any(entry.get("code") == code and entry.get("message") == job["error"] for entry in history):
+        return job["error_history"]
+    history.append({"at": job["updated"], "code": code, "message": job["error"],
+                    "processed_until": job["processed_until"]})
+    return json.dumps(history, ensure_ascii=False)
+
+
+def validate_output_change(job, folder):
+    message = "Miejsce można zmienić tylko dla lokalnych nagrań bez rozpoczętego przetwarzania: " + job["title"]
+    if job["kind"] != "local" or job["status"] in {"running", "done", "draft", "partial"}:
+        raise ValueError(message)
+    if any(job[field] > 0 for field in ("attempts", "processed_until", "progress")):
+        raise ValueError(message)
+    if folder.exists() and any(folder.iterdir()):
+        raise ValueError(message)
 
 
 class Store:
@@ -108,6 +143,12 @@ class Store:
             job_columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
             if "output_root" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN output_root TEXT")
+            for name, definition in (("processed_until", "REAL NOT NULL DEFAULT 0"),
+                                     ("error_code", "TEXT NOT NULL DEFAULT ''"),
+                                     ("error_history", "TEXT NOT NULL DEFAULT '[]'")):
+                if name not in job_columns:
+                    db.execute("ALTER TABLE jobs ADD COLUMN " + name + " " + definition)
+            db.execute("UPDATE jobs SET stage='Oczekuje na wznowienie' WHERE status='pending' AND stage='Wymaga działania'")
 
     @contextmanager
     def connect(self):
@@ -124,26 +165,30 @@ class Store:
     def add_many(self, rows):
         count = 0
         with self.connect() as db:
+            db.execute(BEGIN_WRITE)
             for row in rows:
                 stamp = now()
+                old = db.execute("SELECT source FROM jobs WHERE identity=?", (row["identity"],)).fetchone()
+                if old is not None:
+                    # The first import owns the destination and processing state.
+                    # A deep duplicate must not need a new output path at all.
+                    if row["kind"] == "local" and not Path(old["source"]).exists():
+                        db.execute("UPDATE jobs SET source=?,updated=? WHERE identity=?",
+                                   (row["source"], stamp, row["identity"]))
+                    continue
                 folder = slug(row["title"]) + "__" + row["identity"].replace(":", "-")
                 if row.get("output_root"):
                     from .local_outputs import compact_folder
                     folder = compact_folder(row["title"], row["identity"], row["output_root"])
                 cursor = db.execute('''INSERT OR IGNORE INTO jobs
                     (identity,kind,title,source,date,visibility,duration,source_meta,folder,output_root,
-                     status,enabled,stage,error,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                     status,enabled,stage,error,error_code,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                     (row["identity"], row["kind"], row["title"], row["source"],
                      row.get("date", ""), row.get("visibility", ""), row.get("duration"),
                      json.dumps(row.get("meta", {}), ensure_ascii=False), folder, row.get("output_root"),
                      row.get("status", "pending"), int(row.get("status") != "draft"),
-                     row.get("stage", ""), row.get("error", ""), stamp, stamp))
+                     row.get("stage", ""), row.get("error", ""), row.get("error_code", ""), stamp, stamp))
                 count += cursor.rowcount
-                # A duplicate local file can be used if its old path disappeared.
-                old = db.execute("SELECT source,status FROM jobs WHERE identity=?", (row["identity"],)).fetchone()
-                if row["kind"] == "local" and not Path(old["source"]).exists():
-                    db.execute("UPDATE jobs SET source=?,updated=? WHERE identity=?",
-                               (row["source"], stamp, row["identity"]))
         return count
 
     def jobs(self):
@@ -157,7 +202,7 @@ class Store:
             return dict(row) if row else None
 
     def update(self, job_id, **values):
-        allowed = {"stage", "progress", "error", "status", "duration", "attempts"}
+        allowed = {"stage", "progress", "error", "status", "duration", "attempts", "processed_until", "error_code", "error_history"}
         if not values.keys() <= allowed:
             raise ValueError("Niepoprawne pola aktualizacji zadania.")
         values["updated"] = now()
@@ -179,7 +224,7 @@ class Store:
                            tuple(values.values()))
             return dict(db.execute(SELECT_CONTROL).fetchone())
 
-    def claim(self):
+    def claim(self, excluded=()):
         # Stop and claiming the next film are serialized in the same database.
         with self.connect() as db:
             db.execute(BEGIN_WRITE)
@@ -187,11 +232,14 @@ class Store:
             if control["stop"]:
                 return None
             predicate, parameters = scope_filter(control["scope_kind"], control["scope_ids"], enabled=True)
+            if excluded:
+                predicate += " AND id NOT IN (" + ",".join("?" for _ in excluded) + ")"
+                parameters.extend(sorted(excluded))
             row = db.execute("SELECT * FROM jobs WHERE status='pending' AND " + predicate +
                 " ORDER BY CASE WHEN date='' THEN 1 ELSE 0 END,date,id LIMIT 1", parameters).fetchone()
             if not row:
                 return None
-            db.execute("UPDATE jobs SET status='running',error='',updated=? WHERE id=?", (now(), row["id"]))
+            db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (now(), row["id"]))
             db.execute("UPDATE control SET current_id=? WHERE id=1", (row["id"],))
             return dict(row)
 
@@ -215,19 +263,31 @@ class Store:
                 selected = db.execute("SELECT id,kind FROM jobs WHERE id IN (" + ",".join("?" for _ in ids) + ")", ids).fetchall()
                 if len(selected) != len(ids) or any(kind != "all" and row["kind"] != kind for row in selected):
                     raise ValueError("Wybrane identyfikatory nie należą do wskazanego rodzaju kolejki.")
-            db.execute("UPDATE jobs SET status='pending' WHERE (status='blocked' OR "
+            db.execute("UPDATE jobs SET status='pending',stage='Oczekuje na wznowienie' WHERE (status IN ('blocked','partial') OR "
                        "(status='error' AND stage='Wymaga działania')) AND " + predicate, parameters)
             db.execute("UPDATE control SET stop=0,message='',scope_kind=?,scope_ids=? WHERE id=1",
                        (kind, json.dumps(ids)))
 
     def retry(self, ids=None):
         with self.connect() as db:
-            query = "UPDATE jobs SET status='pending',error='',updated=? WHERE status IN (" + ",".join("?" for _ in RETRYABLE) + ")"
+            query = "UPDATE jobs SET status='pending',stage='Oczekuje na wznowienie',updated=? WHERE status IN (" + ",".join("?" for _ in RETRYABLE) + ")"
             args = [now(), *RETRYABLE]
             if ids:
                 query += " AND id IN (" + ",".join("?" for _ in ids) + ")"
                 args.extend(ids)
             return db.execute(query, args).rowcount
+
+    def record_failure(self, job_id, message, code, *, partial=False, processed_until=0):
+        job = self.get(job_id)
+        history = json.loads(job["error_history"])
+        if job["error"] and not history:
+            history.append({"at": job["updated"], "message": job["error"], "code": job["error_code"] or "legacy_error",
+                            "processed_until": job["processed_until"]})
+        history.append({"at": now(), "message": message, "code": code, "processed_until": processed_until})
+        self.update(job_id, status="partial" if partial else "error", error=message, error_code=code,
+                    processed_until=max(job["processed_until"], processed_until),
+                    stage="Częściowo gotowe" if partial else "Wymaga działania",
+                    error_history=json.dumps(history, ensure_ascii=False))
 
     def configure(self, ids, **values):
         if not values.keys() <= {"enabled", "language", "audio_track"}:
@@ -235,6 +295,10 @@ class Store:
         if not ids:
             return
         with self.connect() as db:
+            if "audio_track" in values:
+                db.execute("UPDATE jobs SET processed_until=0,progress=0,status='pending',stage='Oczekuje na wznowienie' "
+                           "WHERE audio_track<>? AND status NOT IN ('running','done','draft','output_required','no_audio') AND id IN (" +
+                           ",".join("?" for _ in ids) + ")", (values["audio_track"], *ids))
             db.execute("UPDATE jobs SET " + ",".join(f"{key}=?" for key in values) +
                        " WHERE status NOT IN ('running','done','draft') AND id IN (" +
                        ",".join("?" for _ in ids) + ")", (*values.values(), *ids))
@@ -248,7 +312,8 @@ class Store:
             rows = [row for row in rows if row["kind"] == kind]
         with path.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.writer(stream, delimiter=";")
-            writer.writerow(["ID", "Tytuł", "Data", "Typ", "Status", "Etap", "Postęp %", "Błąd", "Źródło", "Wyniki", "Czas trwania (s)"])
+            writer.writerow(["ID", "Tytuł", "Data", "Typ", "Status", "Etap", "Postęp %", "Błąd", "Źródło", "Wyniki",
+                             "Czas trwania (s)", "Opracowano do (s)", "Kod błędu"])
             for job in rows:
                 # Prevent spreadsheet formulas from imported titles / error text.
                 def safe(value):
@@ -256,10 +321,24 @@ class Store:
                     return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
                 writer.writerow(map(safe, [job["identity"], job["title"], job["date"], job["kind"],
                     STATUSES[job["status"]], job["stage"], round(job["progress"], 1), job["error"],
-                    job["source"], str(job_folder(self.root, job)), job["duration"] if job["duration"] is not None else ""]))
+                    job["source"], str(job_folder(self.root, job)), job["duration"] if job["duration"] is not None else "",
+                    job["processed_until"], job["error_code"]]))
+
+    def prepare_output_change(self, job, mode, custom):
+        from .local_outputs import compact_folder, output_root_for
+        old = job_folder(self.root, job)
+        validate_output_change(job, old)
+        base = output_root_for(job["source"], self.root, mode, custom)
+        folder = compact_folder(job["title"], job["identity"], base)
+        metadata = json.loads(job["source_meta"])
+        metadata.pop("output_error", None)
+        metadata.pop("intended_output_root", None)
+        status, error, code, stage = restored_output_state(job, metadata)
+        history = resolved_output_history(job)
+        return (str(base), folder, json.dumps(metadata, ensure_ascii=False),
+                status, error, code, stage, history, now(), job["id"])
 
     def change_output(self, ids, mode, custom=""):
-        from .local_outputs import compact_folder, output_root_for
         if not ids:
             raise ValueError("Zaznacz nagrania, dla których chcesz zmienić miejsce wyników.")
         with self.connect() as db:
@@ -272,11 +351,6 @@ class Store:
                 row = db.execute("SELECT * FROM jobs WHERE id=?", (ident,)).fetchone()
                 if row is None:
                     raise ValueError("Nie znaleziono wybranego nagrania.")
-                job = dict(row)
-                old = job_folder(self.root, job)
-                if job["kind"] != "local" or job["status"] in {"running", "done", "draft"} or job["attempts"] or (old.exists() and any(old.iterdir())):
-                    raise ValueError("Miejsce można zmienić tylko dla lokalnych nagrań bez rozpoczętego przetwarzania: " + job["title"])
-                base = output_root_for(job["source"], self.root, mode, custom)
-                selected.append((str(base), compact_folder(job["title"], job["identity"], base), now(), ident))
-            db.executemany("UPDATE jobs SET output_root=?,folder=?,updated=? WHERE id=?", selected)
+                selected.append(self.prepare_output_change(dict(row), mode, custom))
+            db.executemany("UPDATE jobs SET output_root=?,folder=?,source_meta=?,status=?,error=?,error_code=?,stage=?,error_history=?,updated=? WHERE id=?", selected)
         return len(selected)
