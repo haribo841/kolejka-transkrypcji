@@ -117,8 +117,9 @@ class PathBudgetTests(unittest.TestCase):
         folder = self.root_at_units(183)
         existing = folder / "keep.txt"
         existing.write_bytes(b"keep existing user output")
+        data = report()
         with self.assertRaisesRegex(ResourceError, "zbyt długa"):
-            export(folder, report(), "impossible", complete=False)
+            export(folder, data, "impossible", complete=False)
         self.assertEqual(list(folder.iterdir()), [existing])
         self.assertEqual(existing.read_bytes(), b"keep existing user output")
 

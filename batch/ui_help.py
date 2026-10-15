@@ -6,6 +6,31 @@ import math
 from tkinter import ttk
 
 
+def startable(job):
+    return bool(job["enabled"] and (job["status"] in {"pending", "partial", "blocked", "running"} or
+                                    (job["status"] == "error" and job["stage"] == "Wymaga działania")))
+
+
+def session_mode(control):
+    import json
+    mode = control.get("scope_mode", "legacy")
+    if mode == "legacy":
+        return "selected" if json.loads(control.get("scope_ids", "[]")) else "all"
+    return mode
+
+
+def session_summary(control, jobs):
+    import json
+    ids = set(json.loads(control.get("scope_ids", "[]")))
+    rows = [job for job in jobs if control.get("scope_kind", "all") in {job["kind"], "all"}
+            and (not ids or job["id"] in ids)]
+    remaining = sum(job["enabled"] and job["status"] == "pending" for job in rows)
+    mode = session_mode(control)
+    scope = {"visible": "widoczne", "selected": "zaznaczone", "all": "wszystkie włączone"}[mode]
+    count = len(ids) if ids else len(rows)
+    return f"Zakres sesji: {scope} ({count}) | Pozostało: {remaining}. Zmiany widoku od następnego Start."
+
+
 def status_tags(status):
     from .store import RETRYABLE
     if status in {"done", "draft", "partial"}:
@@ -211,19 +236,20 @@ HELP = {
     "uvr": "Przed transkrypcją oddziela głos od muzyki modelem UVR. Zachowuje źródłowe audio i wokal.flac. Może pomóc przy tle muzycznym, ale wydłuża obliczenia.",
     "keep": "Zachowuje kopię źródłowej ścieżki audio w folderze wyników. UVR włącza tę opcję automatycznie. Oryginalne pliki lokalne nigdy nie są usuwane.",
     "uvr_model": "Jednorazowo pobiera model oddzielający wokal od tła. Nie wymaga konta ani tokenu Hugging Face. Już pobrany model zostanie wykorzystany ponownie.",
-    "search": "Filtruje listę według tytułu lub identyfikatora filmu. Zmienia tylko widok, a nie to, które nagrania są włączone do kolejki.",
+    "search": "Filtruje listę według tytułu lub identyfikatora filmu. Start/Wznów widoczne obejmie tylko włączone nagrania pozostałe na liście. Trwająca sesja zachowuje swój zakres.",
     "date_from": "Pokazuje materiały od tej daty włącznie. Wpisz np. 2020-01-01. Puste pole oznacza brak ograniczenia.",
     "date_to": "Pokazuje materiały do tej daty włącznie. Wpisz datę jako RRRR-MM-DD. Puste pole oznacza brak ograniczenia.",
     "status": "Pokazuje tylko nagrania o wybranym statusie, np. Oczekuje albo Błąd. Filtr nie wyłącza pozostałych z kolejki.",
     "type": "Ogranicza widok do YouTube, plików lokalnych, filmów, transmisji lub Shorts. Nie zmienia kolejności przetwarzania.",
-    "list": "Kliknij wiersz, aby zobaczyć jego opis lub błąd. Ctrl/Shift zaznacza wiele pozycji; Ctrl+A zaznacza widoczne. Dwuklik otwiera folder wyników. Kolumna Kolejka określa, czy Start obejmie pozycję.",
+    "list": "Kliknij nagłówek: rosnąco, malejąco, kolejność oryginalna. Start przetwarza widoczne, włączone nagrania w kolejności tabeli. Ctrl/Shift zaznacza wiele pozycji; Ctrl+A zaznacza widoczne. Dwuklik wiersza otwiera wyniki.",
     "select": "Zaznacza wszystkie pozycje widoczne po zastosowaniu filtrów. Samo zaznaczenie nie dodaje ich do przetwarzania ani go nie rozpoczyna.",
     "enable": "Włącza zaznaczone, oczekujące materiały do kolejnej sesji Start. Nie resetuje gotowych nagrań.",
     "disable": "Pomija zaznaczone materiały przy następnym Start. Pozostają w bazie i można je później ponownie włączyć.",
     "language": "Ustawia język dla zaznaczonych, nieukończonych nagrań: auto wykrywa język; pl lub en wymusza polski albo angielski. Nie tłumaczy wypowiedzi.",
     "track": "Dla jednego zaznaczonego pliku lokalnego pokazuje dostępne ścieżki audio i pozwala wybrać jedną. Domyślnie używana jest pierwsza.",
     "progress": "Postęp bieżącego etapu jednego filmu. Po przejściu do kolejnego etapu procent zaczyna się od nowa. Ukończone bloki pozostają zapisane.",
-    "start": "Rozpoczyna lub wznawia włączone nagrania YouTube od najstarszych. Pliki lokalne uruchamia się w karcie Kolejka lokalna. Gotowe materiały są pomijane. Sam filtr listy nie ogranicza zakresu Start.",
+    "start": "Rozpoczyna lub wznawia widoczne, włączone nagrania w kolejności tabeli. Filtry ograniczają zakres. Kolejność jest zapisana na całą sesję; późniejsze zmiany widoku i nowe importy obowiązują od następnego Start.",
+    "start_selected": "Uruchamia zaznaczone, widoczne i włączone nagrania w kolejności tabeli. Pozostałe nagrania zachowują swoje ustawienia i postęp.",
     "stop": "Zapisuje żądanie zatrzymania po całym bieżącym filmie: pobraniu, UVR, transkrypcji, mówcach i eksporcie. Nie przerywa aktualnego etapu. Następny film nie ruszy.",
     "retry": "Przywraca problematyczne nagrania do oczekujących. Działa na zaznaczonych; bez zaznaczenia obejmuje wszystkie nieudane. Potem naciśnij Start.",
     "results": "Otwiera folder wyników jednego zaznaczonego filmu. Przy wielu zaznaczeniach lub braku zaznaczenia otwiera wspólny folder wyników.",

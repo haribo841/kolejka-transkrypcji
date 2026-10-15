@@ -310,7 +310,7 @@ def wait_for_launch(root, timeout=10):
         time.sleep(.02)
 
 
-def launch(root, *, kind="all", job_ids=None):
+def launch(root, *, kind="all", job_ids=None, order_ids=None, scope_mode="legacy"):
     root = Path(root).resolve()
     kind = scope_kind(kind)
     launch_lock = WorkerLock(root / "uruchamianie")
@@ -324,7 +324,7 @@ def launch(root, *, kind="all", job_ids=None):
         if not worker_lock.acquire():
             raise ResourceError("Kolejka już pracuje. Dokończ bieżące nagranie i zatrzymaj ją przed zmianą rodzaju lub zakresu.")
         store = Store(root)
-        store.start(kind=kind, job_ids=job_ids)
+        store.start(kind=kind, job_ids=job_ids, order_ids=order_ids, scope_mode=scope_mode)
         started = True
         log_path = root / "worker.log"
         with log_path.open("ab", buffering=0) as log:

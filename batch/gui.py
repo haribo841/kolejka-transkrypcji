@@ -19,7 +19,8 @@ from .result_paths import output_paths
 from .store import RETRYABLE, STATUSES, Store
 from .transcript_tab import TranscriptTab
 from .ui_help import (HELP, Tooltip, collapsible_help, duration_text, help_button, next_job,
-                      status_tags, sync_tree, wrap_with_parent)
+                      session_mode, session_summary, startable, status_tags, sync_tree, wrap_with_parent)
+from .table_view import TableView, column_value
 from .readiness import (ACTION, collect_readiness, file_stamp, readiness_summary, check_destination)
 from .worker import launch, preflight
 from .store import now
@@ -51,6 +52,7 @@ class QueueWindow:
         self.start_pending = self.launch_kind = self.launch_process = None
         self.launch_deadline = 0
         self.start_scope_ids = None
+        self.start_scope_mode = "visible"
         self.pending_filter = self.refresh_after = self.events_after = self.navigation_after = None
         self.setup_dialog = self.youtube_dialog = self.guide_dialog = None
         self.readiness, self.readiness_key = {}, None
@@ -59,6 +61,7 @@ class QueueWindow:
         self.metadata_attempted = set()
         self.help_status = tk.StringVar(master=self.window, value="Podpowiedź pojawi się po zatrzymaniu kursora. Tab i F1: pomoc z klawiatury.")
         self.counts, self.current, self.detail, self.model_state, self.local_model_state = (tk.StringVar(master=self.window) for _ in range(5))
+        self.youtube_scope_summary = tk.StringVar(master=self.window)
         self.uvr_enabled = tk.BooleanVar(master=self.window, value=self.config.get("uvr_enabled", False))
         self.keep_audio = tk.BooleanVar(master=self.window, value=self.config.get("keep_audio", False))
         self.style = ttk.Style(self.window)
@@ -143,17 +146,19 @@ class QueueWindow:
             self.tree.column(column, width=width, minwidth=40, stretch=column == "title")
         vertical = ttk.Scrollbar(listing, orient="vertical", command=self.tree.yview)
         horizontal = ttk.Scrollbar(listing, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.tree.configure(yscrollcommand=vertical.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         vertical.grid(row=0, column=1, sticky="ns")
         horizontal.grid(row=1, column=0, sticky="ew")
         listing.rowconfigure(0, weight=1)
         listing.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self.show_detail)
-        self.tree.bind("<Double-1>", lambda event: self.open_results())
+        self.tree.bind("<Double-1>", self.open_row_results)
         self.tree.bind("<Control-a>", self.select_visible)
         for tag, color in (("done", "#25723b"), ("error", "#ae2020"), ("draft", "#777777")):
             self.tree.tag_configure(tag, foreground=color)
+        self.table_view = TableView(self.tree, self.root, "youtube", self.render_list, self.help_status,
+                                    value_for=self.table_value, scroll_set=horizontal.set)
         selection = ttk.Frame(outer)
         selection.pack(fill="x", pady=6)
         for key, text, action in (("select", "Zaznacz widoczne", self.select_visible),
@@ -162,6 +167,7 @@ class QueueWindow:
                                   ("language", "Ustaw język", self.language), ("track", "Wybierz ścieżkę audio", self.audio_track)):
             self.button(selection, key, text, action).pack(side="left", padx=(0, 6))
         ttk.Label(outer, textvariable=self.counts).pack(anchor="w")
+        ttk.Label(outer, textvariable=self.youtube_scope_summary, wraplength=1230).pack(anchor="w", pady=3)
         ttk.Label(outer, textvariable=self.current, wraplength=1230).pack(anchor="w", pady=3)
         self.progress = ttk.Progressbar(outer, maximum=100)
         self.progress.pack(fill="x", pady=(0, 4))
@@ -170,14 +176,13 @@ class QueueWindow:
         ttk.Label(outer, textvariable=self.detail, wraplength=1230).pack(anchor="w", pady=(0, 5))
         actions = ttk.Frame(outer)
         actions.pack(fill="x")
-        for key, text, action in (("start", "Start/Wznów", self.start), ("stop", "Dokończ bieżący i zatrzymaj", self.stop),
+        for key, text, action in (("start", "Start/Wznów widoczne (0)", self.start),
+                                  ("start_selected", "Start zaznaczonych (0)", self.start_youtube_selected),
+                                  ("stop", "Dokończ bieżący i zatrzymaj", self.stop),
                                   ("retry", "Ponów nieudane", self.retry), ("results", "Otwórz wyniki", self.open_results),
                                   ("transcript", "Otwórz TXT", self.open_transcript)):
             self.button(actions, key, text, action).pack(side="left", padx=(0, 8))
         self.selected_only = tk.BooleanVar(master=self.window, value=False)
-        selection_option = ttk.Checkbutton(actions, text="Start tylko zaznaczonych", variable=self.selected_only)
-        selection_option.pack(side="left")
-        self.add_help(selection_option, "selected_only")
         collapsible_help(outer, self.help_status)
         self.wrap_labels(outer)
 
@@ -196,7 +201,7 @@ class QueueWindow:
         Tooltip(widget, HELP[key], self.help_status)
 
     def button(self, parent, key, label, action):
-        factory = SessionButton if key == "start" else help_button
+        factory = SessionButton if key in {"start", "start_selected"} else help_button
         button = factory(parent, label, action, HELP[key], self.help_status)
         self.controls[key] = button
         return button
@@ -210,6 +215,7 @@ class QueueWindow:
         self.closing = True
         self.transcript_tab.close()
         self.local_tab.close()
+        self.table_view.close()
         if self.setup_dialog and not self.setup_dialog.closed:
             self.setup_dialog.close()
         if self.youtube_dialog and not self.youtube_dialog.closed:
@@ -257,7 +263,7 @@ class QueueWindow:
         self.jump_to_next("youtube")
 
     def jump_to_next(self, kind, clear_filters=True):
-        job = next_job(self.jobs.values(), kind, self.store.control().get("current_id"))
+        job = self.next_visible_job(kind, clear_filters)
         if job is None:
             (self.local_tab.note if kind == "local" else self.source_note).set("Nie ma włączonych nagrań oczekujących w tej kolejce.")
             return
@@ -280,6 +286,23 @@ class QueueWindow:
             tree.see(item)
             children = tree.get_children()
             tree.yview_moveto(children.index(item) / len(children))
+
+    def next_visible_job(self, kind, clear_filters):
+        control = self.store.control()
+        current = self.jobs.get(control.get("current_id"))
+        if current and current["kind"] == kind and current["status"] == "running":
+            return current
+        if control["state"] == "running" and control.get("scope_kind") in {kind, "all"}:
+            ordered = json.loads(control.get("order_ids", "[]"))
+            next_in_session = next((self.jobs[ident] for ident in ordered if ident in self.jobs and
+                                    self.jobs[ident]["kind"] == kind and self.jobs[ident]["enabled"] and
+                                    self.jobs[ident]["status"] == "pending"), None)
+            if next_in_session:
+                return next_in_session
+        candidate = next((job for job in self.visible_jobs(kind) if startable(job)), None)
+        if candidate or not clear_filters:
+            return candidate
+        return next_job(self.jobs.values(), kind)
 
     def request_readiness(self, force=False):
         if self.readiness_busy or self.closing:
@@ -355,6 +378,19 @@ class QueueWindow:
     def type_of(self, job):
         return "Lokalne" if job["kind"] == "local" else json.loads(job["source_meta"]).get("kind", "YouTube")
 
+    def table_value(self, job, column):
+        return self.type_of(job) if column == "type" else column_value(job, column)
+
+    def open_row_results(self, event):
+        if self.tree.identify_region(event.x, event.y) in {"cell", "tree"} and self.tree.identify_row(event.y):
+            self.open_results()
+
+    def visible_jobs(self, kind, rows=None):
+        rows = self.jobs.values() if rows is None else rows
+        if kind == "local":
+            return self.local_tab.ordered_jobs(rows)
+        return self.table_view.order([job for job in rows if self.matches_youtube_view(job)])
+
     def matches_youtube_view(self, job):
         if job["kind"] != "youtube":
             return False
@@ -371,15 +407,15 @@ class QueueWindow:
 
     def render_list(self):
         visible_rows = []
-        for job in self.jobs.values():
-            if not self.matches_youtube_view(job):
-                continue
+        for job in self.visible_jobs("youtube"):
             day = job["date"][:10]
             item = str(job["id"])
             values = ("Tak" if job["enabled"] else "", day, self.type_of(job), STATUSES[job["status"]],
                       f"{job['progress']:.0f}", duration_text(job["duration"]), job["title"], job["language"], job["audio_track"] + 1)
             visible_rows.append((item, values, status_tags(job["status"])))
         sync_tree(self.tree, self.visible, visible_rows)
+        if hasattr(self, "local_tab"):
+            self.update_session_controls()
 
     def refresh(self):
         rows = self.store.jobs()
@@ -419,15 +455,26 @@ class QueueWindow:
         if active or not waiting:
             self.launch_kind = self.launch_process = None
             waiting = False
-        for kind, button in (("youtube", self.controls["start"]), ("local", self.local_tab.controls["start"])):
-            starting = self.start_pending == kind or (waiting and not active and self.launch_kind == kind)
-            running = active and scope in {kind, "all"}
-            pending = any(job["kind"] == kind and job["enabled"] and
-                          (job["status"] in {"pending", "partial", "blocked", "running"} or
-                           (job["status"] == "error" and job["stage"] == "Wymaga działania")) for job in self.jobs.values())
-            button.show_session(active=running, starting=starting, stopping=running and bool(control["stop"]),
-                                enabled=pending and not alive and not self.busy_import and not self.start_pending and not waiting)
+        self.update_youtube_start(control, alive, waiting, active and scope in {"youtube", "all"})
         self.local_tab.update_start_controls(control, alive, waiting)
+
+    def update_youtube_start(self, control, alive, waiting, running):
+        rows = self.visible_jobs("youtube")
+        selected = {int(item) for item in self.tree.selection()}
+        total = sum(startable(job) for job in rows)
+        count = sum(startable(job) and job["id"] in selected for job in rows)
+        starting = self.start_pending == "youtube" or (waiting and self.launch_kind == "youtube")
+        mode = session_mode(control) if running else self.start_scope_mode
+        enabled = not alive and not self.busy_import and not self.start_pending and not waiting
+        for key, amount, label, selected_mode in (("start", total, "Start/Wznów widoczne", False),
+                                                  ("start_selected", count, "Start zaznaczonych", True)):
+            button = self.controls[key]
+            button.idle_text = f"{label} ({amount})"
+            matching = (mode == "selected") == selected_mode
+            button.show_session(active=running and matching, starting=starting and matching,
+                                stopping=running and bool(control["stop"]), enabled=bool(amount) and enabled)
+        self.youtube_scope_summary.set(session_summary(control, self.jobs.values()) if running else
+                                       f"Start/Wznów widoczne: {total} | Start zaznaczonych: {count}. Filtry ograniczają zakres; kolejność według tabeli.")
 
     def show_current(self, control, alive, job, scope):
         if alive and scope == "local":
@@ -476,6 +523,8 @@ class QueueWindow:
                 self.detail.set("Nie udało się odczytać nazwy wyniku. Otwórz folder nagrania.")
         else:
             self.detail.set(f"Zaznaczono: {len(selected)}")
+        if hasattr(self, "local_tab"):
+            self.update_session_controls()
 
     def background(self, function, note=None):
         if self.busy_import:
@@ -577,26 +626,23 @@ class QueueWindow:
         if self.start_in_progress():
             return
         self.start_pending = kind
+        job_ids = self.requested_start_ids(kind, job_ids)
+        self.start_scope_mode = "selected" if job_ids is not None else "visible"
         self.start_scope_ids = job_ids
         self.update_session_controls()
         self.window.update_idletasks()
         try:
             if not self.ready_to_start(kind):
                 return
-            if kind == "youtube" and self.selected_only.get():
-                job_ids = [int(item) for item in self.tree.selection()]
-                if not job_ids:
-                    messagebox.showinfo("Start", "Zaznacz materiały do przetworzenia.", parent=self.window)
-                    return
-            pending = [job for job in self.store.jobs() if job["kind"] == kind and job["enabled"]
-                       and (job["status"] in {"pending", "partial", "blocked", "running"}
-                            or (job["status"] == "error" and job["stage"] == "Wymaga działania"))
-                       and (job_ids is None or job["id"] in job_ids)]
+            pending = self.start_candidates(kind, job_ids)
             if not pending:
                 messagebox.showinfo("Kolejka", "Nie ma włączonych nagrań oczekujących w tym zakresie. Nieudane możesz ponowić odpowiednim przyciskiem.", parent=self.window)
                 return
             check_destination(job_folder(self.root, pending[0]), self.config["min_free_gb"])
-            self.launch_process = launch(self.root, kind=kind, job_ids=job_ids)
+            ordered_ids = [job["id"] for job in pending]
+            self.start_scope_ids = ordered_ids
+            self.launch_process = launch(self.root, kind=kind, job_ids=ordered_ids,
+                                         order_ids=ordered_ids, scope_mode=self.start_scope_mode)
             self.launch_kind, self.launch_deadline = kind, time.monotonic() + 10
             atomic_json(self.root / START_ERROR_FILE, {"at": now(), "kind": kind, "message": ""})
         except Exception as exc:
@@ -605,6 +651,19 @@ class QueueWindow:
         finally:
             self.start_pending = None
             self.update_session_controls()
+
+    def requested_start_ids(self, kind, job_ids):
+        if job_ids is None and kind == "youtube" and self.selected_only.get():
+            return [int(item) for item in self.tree.selection()]
+        return job_ids
+
+    def start_candidates(self, kind, job_ids=None):
+        selected = None if job_ids is None else set(job_ids)
+        return [job for job in self.visible_jobs(kind, self.store.jobs()) if startable(job)
+                and (selected is None or job["id"] in selected)]
+
+    def start_youtube_selected(self):
+        self.start(kind="youtube", job_ids=[int(item) for item in self.tree.selection()])
 
     def record_start_error(self, kind, message):
         from .hf_access import redact
@@ -825,7 +884,7 @@ class QueueWindow:
         content.tag_configure("heading", font=(FONT_FAMILY, 11, "bold"), spacing1=12, spacing3=4)
         for heading, keys in (("Przygotowanie", ("speakers", "test", "youtube_access", "import", "files", "folder")),
                               ("Wybór i ustawienia nagrań", ("search", "select", "enable", "disable", "language", "track", "uvr", "keep", "uvr_model")),
-                              ("Praca i wyniki", ("start", "selected_only", "stop", "retry", "results", "transcript", "csv"))):
+                              ("Praca i wyniki", ("start", "start_selected", "stop", "retry", "results", "transcript", "csv"))):
             content.insert("end", heading + "\n", "heading")
             for key in keys:
                 widget = self.controls[key]
@@ -836,7 +895,7 @@ class QueueWindow:
         content.insert("end", "Obróbka transkrypcji\n", "heading")
         content.insert("end", "Karta Obróbka transkrypcji usuwa etykiety mówców z gotowych TXT, SRT i VTT. Dodaj pliki lub wybierz Wszystkie gotowe, sprawdź podgląd i zapisz kopie. Timestampy oraz wypowiedzi pozostają bez zmian. Domyślny folder kopii to obrobione; oryginały pozostają zachowane.\n")
         content.insert("end", "Kolejka lokalna\n", "heading")
-        content.insert("end", "Dodaj folder... otwiera wybór folderu i od razu importuje znalezione nagrania. Możesz też wkleić ścieżkę i kliknąć Dodaj z podanej ścieżki. Opcje Podfoldery i Tylko M4A określają zakres skanowania. Po imporcie lista pokazuje i zaznacza znalezione pozycje, także już obecne; komunikat podaje liczbę nowych nagrań i duplikatów. Ponowny import nie resetuje postępu. Materiały z błędem przywracasz przyciskiem Ponów nieudane. Start/Wznów lokalne obejmuje tylko pliki lokalne. Opcja Start tylko zaznaczonych ogranicza sesję bez wyłączania innych materiałów. Jeden wykonawca obsługuje jedną sesję; aby zmienić kolejkę, dokończ bieżące nagranie i zatrzymaj.\n")
+        content.insert("end", "Dodaj folder... otwiera wybór folderu i od razu importuje znalezione nagrania. Możesz też wkleić ścieżkę i kliknąć Dodaj z podanej ścieżki. Opcje Podfoldery i Tylko M4A określają zakres skanowania. Ponowny import nie resetuje postępu. Kliknij nagłówek, aby ustalić kolejność. Start/Wznów widoczne obejmuje włączone nagrania pozostałe po filtrowaniu, a Start zaznaczonych ich zaznaczony podzbiór. Sesja zachowuje zapisany zakres i kolejność; późniejsze zmiany widoku oraz nowe importy obowiązują od następnego Start. Jeden wykonawca obsługuje jedną sesję; aby zmienić kolejkę, dokończ bieżące nagranie i zatrzymaj.\n")
         content.configure(state="disabled")
         Tooltip(content, "Przewijaj kółkiem myszy lub klawiszami Page Up / Page Down. Tekst możesz zaznaczyć i skopiować.", popup=False)
         help_button(frame, "Zamknij pomoc", dialog.destroy, "Wraca do kolejki bez zmiany jej stanu.").pack(anchor="e", pady=(10, 0))

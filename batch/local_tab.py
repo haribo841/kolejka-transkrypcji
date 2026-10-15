@@ -13,11 +13,13 @@ from .importers import MEDIA, import_local
 from .import_report import import_note
 from .store import RETRYABLE, STATUSES, now
 from .ui_help import (HELP, Tooltip, collapsible_help, duration_text, help_button,
-                      status_tags, sync_tree, wrap_with_parent)
+                      session_mode, session_summary, startable, status_tags, sync_tree, wrap_with_parent)
+from .table_view import TableView
 from .local_outputs import OUTPUT_MODES, scan_media
 from .session_button import SessionButton
 
 ENABLED_STATE = "!disabled"
+LOCAL_IMPORT_REPORT = "ostatni-import-lokalny.json"
 
 
 def folder_media(folder, recursive=True, m4a_only=False, excluded=(), *, progress=lambda message: None,
@@ -41,12 +43,12 @@ class LocalQueueTab:
         self.search = tk.StringVar(master=parent)
         self.status = tk.StringVar(master=parent, value="Wszystkie")
         self.note = tk.StringVar(master=parent, value="Dodaj folder... wybiera folder i dodaje jego nagrania do listy. Transkrypcję uruchamiasz osobno przyciskiem Start.")
-        last_import = read_json(app.root / "ostatni-import-lokalny.json", {})
+        last_import = read_json(app.root / LOCAL_IMPORT_REPORT, {})
         if last_import.get("files") is not None:
             self.note.set(import_note(last_import))
         self.counts, self.current, self.detail = (tk.StringVar(master=parent) for _ in range(3))
         self.scope_summary = tk.StringVar(master=parent)
-        self.hint = tk.StringVar(master=parent, value="Start obejmuje tylko pliki lokalne. Miejsce wyników zapisujemy osobno dla każdego nagrania.")
+        self.hint = tk.StringVar(master=parent, value="Start obejmuje widoczne, włączone pliki lokalne w kolejności tabeli. Zmiany widoku podczas sesji obowiązują od następnego Start.")
         frame = ttk.Frame(parent, padding=12)
         frame.pack(fill="both", expand=True)
         toolbar = ttk.Frame(frame)
@@ -117,7 +119,7 @@ class LocalQueueTab:
             self.tree.column(column, width=width, minwidth=40, stretch=column == "title")
         vertical = ttk.Scrollbar(listing, orient="vertical", command=self.tree.yview)
         horizontal = ttk.Scrollbar(listing, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.tree.configure(yscrollcommand=vertical.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         vertical.grid(row=0, column=1, sticky="ns")
         horizontal.grid(row=1, column=0, sticky="ew")
@@ -127,9 +129,10 @@ class LocalQueueTab:
             self.tree.tag_configure(tag, foreground=color)
         self.tree.bind("<<TreeviewSelect>>", self.show_detail)
         self.tree.bind("<Control-a>", self.select_visible)
-        self.tree.bind("<Double-1>", lambda event: app.open_results(self.selected()))
+        self.tree.bind("<Double-1>", self.open_row_results)
         self.controls["list"] = self.tree
         Tooltip(self.tree, HELP["list"], self.hint, popup=False)
+        self.table_view = TableView(self.tree, app.root, "local", self.render, self.hint, scroll_set=horizontal.set)
         # Reserve the footer before allocating the remaining height to the table.
         # Recovery and stop controls must remain reachable at minimum window size.
         footer = ttk.Frame(frame)
@@ -155,7 +158,7 @@ class LocalQueueTab:
         actions = ttk.Frame(footer)
         actions.pack(fill="x")
         for key, text, action, hint in (
-                ("start", "Start/Wznów lokalne", self.start, "Przetwarza wszystkie włączone lokalne nagrania oczekujące i częściowe, niezależnie od zaznaczenia."),
+                ("start", "Start/Wznów widoczne (0)", self.start, HELP["start"]),
                 ("start_selected", "Start zaznaczonych (0)", self.start_selected, "Przetwarza wyłącznie zaznaczone nagrania. Po ostatnim z nich sesja się kończy."),
                 ("stop", "Dokończ bieżący i zatrzymaj", lambda: app.stop(kind="local"), HELP["stop"])):
             self.button(actions, key, text, action, hint).pack(side="left", padx=(0, 6))
@@ -172,11 +175,15 @@ class LocalQueueTab:
         collapsible_help(footer, self.hint)
 
     def open_import_report(self):
-        path = self.app.root / "ostatni-import-lokalny.json"
+        path = self.app.root / LOCAL_IMPORT_REPORT
         if path.is_file():
             os.startfile(str(path))
         else:
             self.note.set("Raport powstanie po dodaniu folderu lub plików.")
+
+    def open_row_results(self, event):
+        if self.tree.identify_region(event.x, event.y) in {"cell", "tree"} and self.tree.identify_row(event.y):
+            self.app.open_results(self.selected())
 
     def help(self, widget, key, hint):
         self.controls[key] = widget
@@ -293,7 +300,7 @@ class LocalQueueTab:
                                   config=config, output_mode=mode, output_root=custom)
             result["local_import"] = True
             result["note"] = import_note(result, folder_scope)
-            atomic_json(self.app.root / "ostatni-import-lokalny.json", {"at": now(), **result})
+            atomic_json(self.app.root / LOCAL_IMPORT_REPORT, {"at": now(), **result})
             return result
         self.app.background(run, note=self.note)
 
@@ -302,7 +309,7 @@ class LocalQueueTab:
         self.search.set("")
         self.status.set("Wszystkie")
         if result.get("issues"):
-            self.note.set(self.note.get() + " | Raport: " + str(self.app.root / "ostatni-import-lokalny.json"))
+            self.note.set(self.note.get() + " | Raport: " + str(self.app.root / LOCAL_IMPORT_REPORT))
         self.app.jobs = {job["id"]: job for job in self.app.store.jobs()}
         self.render()
         added = [str(ident) for ident in result.get("job_ids", []) if self.tree.exists(str(ident))]
@@ -328,14 +335,19 @@ class LocalQueueTab:
         self.filter_after = None
         self.render()
 
+    def matches_view(self, job):
+        return (job["kind"] == "local" and self.search.get().casefold() in
+                (job["title"] + " " + job["source"]).casefold() and
+                (self.status.get() == "Wszystkie" or STATUSES[job["status"]] == self.status.get()))
+
+    def ordered_jobs(self, rows=None):
+        rows = self.app.jobs.values() if rows is None else rows
+        return self.table_view.order([job for job in rows if self.matches_view(job)])
+
     def render(self):
         rows = [job for job in self.app.jobs.values() if job["kind"] == "local"]
         visible_rows = []
-        for job in rows:
-            if self.search.get().casefold() not in (job["title"] + " " + job["source"]).casefold():
-                continue
-            if self.status.get() != "Wszystkie" and STATUSES[job["status"]] != self.status.get():
-                continue
+        for job in self.ordered_jobs(rows):
             item = str(job["id"])
             values = ("Tak" if job["enabled"] else "", STATUSES[job["status"]], job["stage"],
                       f"{job['progress']:.0f}", duration_text(job["duration"]), Path(job["source"]).suffix.upper().lstrip("."),
@@ -424,36 +436,36 @@ class LocalQueueTab:
         self.app.start(kind="local", job_ids=ids)
 
     def eligible(self, job):
-        return job['kind'] == 'local' and job['enabled'] and (job['status'] in {'pending', 'partial', 'running'} or
-                                                            (job['status'] == 'error' and job['stage'] == 'Wymaga działania'))
+        return job['kind'] == 'local' and startable(job)
 
     def update_start_controls(self, control, alive, waiting):
         selected = set(self.selected())
-        count = sum(self.eligible(job) and job['id'] in selected for job in self.app.jobs.values())
+        visible = self.ordered_jobs()
+        count = sum(self.eligible(job) and job['id'] in selected for job in visible)
         button = self.controls['start_selected']
         button.idle_text = f"Start zaznaczonych ({count})"
-        session = alive and control['state'] == 'running' and control.get('scope_kind') == 'local'
-        ids = json.loads(control.get('scope_ids', '[]')) if session else self.app.start_scope_ids
+        session = alive and control['state'] == 'running' and control.get('scope_kind') in {'local', 'all'}
         starting = self.app.start_pending == 'local' or (waiting and self.app.launch_kind == 'local')
-        scoped = bool(ids)
+        mode = session_mode(control) if session else self.app.start_scope_mode
+        scoped = mode == "selected"
         enabled = count > 0 and not alive and not self.app.busy_import and not self.app.start_pending and not waiting
         button.show_session(active=session and scoped, starting=starting and scoped,
                             stopping=session and bool(control['stop']), enabled=enabled)
         main = self.controls['start']
-        if (session or starting) and scoped:
-            main.show_session(enabled=False)
-        self.update_scope_summary(session, ids, count)
+        total = sum(self.eligible(job) for job in visible)
+        main.idle_text = f"Start/Wznów widoczne ({total})"
+        main.show_session(active=session and not scoped, starting=starting and not scoped,
+                          stopping=session and bool(control['stop']),
+                          enabled=total > 0 and not alive and not self.app.busy_import and not self.app.start_pending and not waiting)
+        self.update_scope_summary(session, count)
         self.update_recovery_controls(selected, enabled)
 
-    def update_scope_summary(self, session, ids, count):
+    def update_scope_summary(self, session, count):
         if session:
-            remaining = sum(self.eligible(job) and job['status'] != 'running' and (not ids or job['id'] in ids)
-                            for job in self.app.jobs.values())
-            scope = f"zaznaczone ({len(ids)})" if ids else "wszystkie włączone lokalne"
-            self.scope_summary.set(f"Zakres sesji: {scope} | Pozostało: {remaining}")
+            self.scope_summary.set(session_summary(self.app.store.control(), self.app.jobs.values()))
         else:
-            total = sum(self.eligible(job) for job in self.app.jobs.values())
-            self.scope_summary.set(f"Start/Wznów lokalne: wszystkie włączone ({total}) | Start zaznaczonych: {count}")
+            total = sum(self.eligible(job) for job in self.ordered_jobs())
+            self.scope_summary.set(f"Start/Wznów widoczne: {total} | Start zaznaczonych: {count}. Filtry ograniczają zakres; kolejność według tabeli.")
 
     def update_recovery_controls(self, selected, enabled):
         single = len(selected) == 1
@@ -486,6 +498,7 @@ class LocalQueueTab:
             self.note.set('Brak pliku logu. Szczegóły ostatniego problemu są widoczne pod listą.')
 
     def close(self):
+        self.table_view.close()
         if self.filter_after:
             self.parent.after_cancel(self.filter_after)
             self.filter_after = None

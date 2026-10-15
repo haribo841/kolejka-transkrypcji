@@ -205,21 +205,24 @@ class RecoveryTests(Fixture):
 
     def test_no_valid_audio_remains_error_after_only_one_extra_attempt(self):
         self.effects = [0, 0]
+        recovery = VocalRecovery(self.request, self.api)
         with self.assertRaisesRegex(JobError, "UVR skrócił"):
-            VocalRecovery(self.request, self.api).run()
+            recovery.run()
         self.assertEqual(len(self.calls), 2)
         self.assertFalse((self.work / "uvr-result.json").exists())
 
     def test_resource_failure_never_becomes_partial_or_retries(self):
         self.effects = [MemoryError("out of memory")]
+        recovery = VocalRecovery(self.request, self.api)
         with self.assertRaises(MemoryError):
-            VocalRecovery(self.request, self.api).run()
+            recovery.run()
         self.assertEqual(len(self.calls), 1)
 
     def test_unusable_shared_uvr_model_stops_without_file_recovery(self):
+        recovery = VocalRecovery(self.request, self.api)
         with patch.object(self.api, "separator", side_effect=RuntimeError("invalid model")):
             with self.assertRaisesRegex(ResourceError, "modelu UVR"):
-                VocalRecovery(self.request, self.api).run()
+                recovery.run()
         self.assertEqual(self.calls, [])
 
     def test_recovery_uses_sixty_second_cores_with_original_overlap(self):
@@ -282,9 +285,10 @@ class PartialExportTests(Fixture):
 
     def test_failed_reexport_keeps_the_previous_valid_partial(self):
         export(self.root, self.report(), "v1", complete=False)
+        report = self.report()
         with patch("batch.exporter.atomic_new_bytes", side_effect=OSError("interrupted")):
             with self.assertRaises(OSError):
-                export(self.root, self.report(), "v2", complete=False)
+                export(self.root, report, "v2", complete=False)
         self.assertTrue(verify_outputs(self.root, "local:fixture", "v1", partial=True))
 
     def test_partial_completion_in_worker_keeps_audio_and_durable_resume_position(self):

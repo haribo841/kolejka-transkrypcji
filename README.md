@@ -62,9 +62,9 @@ The interface is currently in Polish. These are the main controls:
 | Test a recording sample | Sprawdź na fragmencie |
 | Select a folder and import its recordings | Dodaj folder... |
 | Import from the entered folder path | Dodaj z podanej ścieżki |
-| Start or resume the YouTube queue | Start/Wznów |
-| Start or resume the local queue | Start/Wznów lokalne |
-| Start selected local jobs | Start zaznaczonych (N) |
+| Start or resume the visible YouTube queue | Start/Wznów widoczne (N) |
+| Start or resume the visible local queue | Start/Wznów widoczne (N) |
+| Start selected jobs in either queue | Start zaznaczonych (N) |
 | Resume a missing tail | Wznów brakującą część |
 | Open verified partial text | Otwórz częściowy TXT |
 | Open a recording's error log | Otwórz log błędu |
@@ -100,7 +100,11 @@ New folder and export names share a Windows path budget. Longer source directori
 
 Starting the local queue does not start YouTube jobs. If another session is active, finish its current recording and stop it before switching queues. Resuming reuses the existing checkpoints and results; closing the window leaves the worker running. Vocal separation and audio retention settings are shared by both queues.
 
-**Start/Wznów lokalne** includes all enabled local jobs, regardless of the table selection. **Start zaznaczonych (N)** includes only the selection. The session banner shows its scope and remaining recordings. A completed job, file error, or partial result advances to the next recording. Missing shared models, exhausted memory, insufficient disk space, and a user stop request pause the session.
+**Start/Wznów widoczne (N)** processes eligible, enabled recordings remaining in the current table after its search and filters. **Start zaznaczonych (N)** processes the selected eligible, visible and enabled subset. Both queues use the table's order. The session saves its ordered recording IDs at Start, so later sorting, filtering and imports apply to the next Start. The session banner shows its scope and remaining recordings. A completed job, file error, or partial result advances to the next recording. Missing shared models, exhausted memory, insufficient disk space, and a user stop request pause the session.
+
+Click a column heading to cycle through ascending order, descending order and the original chronological order. The active heading displays ▲ or ▼. Text comparison is case-insensitive and respects Polish letters; dates, duration, progress and audio tracks use their underlying values, with unknown values last in both directions. **Pomiń przetworzone** in the title heading moves completed recordings to the end in their original order while sorting is active. Partial recordings remain sorted. The third heading click restores the full original order even when the checkbox is checked. Each queue remembers its own sort and checkbox settings; refreshes preserve the selection and scroll position. The existing CLI defaults remain chronological and are independent of table filters.
+
+See the [sorting and session-order validation notes](docs/SORTING-2026-10-14.md).
 
 UVR uses the selected audio track's sample positions on the video clock. A successfully decoded source track that ends before the video is padded with silence; missing model output is never stretched or silently replaced with silence. If UVR truncates vocals, valid blocks and a verified prefix are retained, followed by one recovery pass over the missing tail in 60-second blocks with the normal context overlap.
 

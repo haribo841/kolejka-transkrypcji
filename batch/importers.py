@@ -157,10 +157,13 @@ def local_entry(store, path, config, output_mode, output_root):
             metadata["probe_error"] = error
             metadata["probe_error_code"] = diagnose(exc)
     base = str(output_root_for(path, store.root, output_mode, output_root)) if output_mode else None
+    status = "error" if error else "pending"
+    if metadata.get("probe_error_code") == "no_audio":
+        status = "no_audio"
     entry = {"identity": "local:" + checksum, "kind": "local", "source": str(path), "title": path.stem,
             "date": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
             "duration": duration, "meta": metadata, "output_root": base,
-            "status": "no_audio" if metadata.get("probe_error_code") == "no_audio" else "error" if error else "pending",
+            "status": status,
             "error_code": metadata.get("probe_error_code", ""), "error": error,
             "stage": "Walidacja pliku" if error else ""}
     return validate_local_output(store, entry)

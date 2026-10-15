@@ -19,6 +19,7 @@ STATUSES = {
 }
 RETRYABLE = ("error", "partial", "unavailable", "login_required", "scheduled", "live", "blocked")
 SCOPE_KINDS = ("all", "youtube", "local")
+SCOPE_MODES = ("legacy", "visible", "selected")
 BEGIN_WRITE = "BEGIN IMMEDIATE"
 SELECT_CONTROL = "SELECT * FROM control WHERE id=1"
 
@@ -38,6 +39,44 @@ def scope_ids(value):
     if not isinstance(value, (list, tuple, set)) or any(type(item) is not int or item <= 0 for item in value):
         raise ValueError("Zakres nagrań musi zawierać dodatnie całkowite identyfikatory.")
     return sorted(set(value))
+
+
+def scope_mode(value):
+    if value not in SCOPE_MODES:
+        raise ValueError("Tryb sesji musi mieć wartość legacy, visible albo selected.")
+    return value
+
+
+def ordered_ids(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Kolejność sesji musi być listą identyfikatorów.") from exc
+    if not isinstance(value, (list, tuple)) or any(type(item) is not int or item <= 0 for item in value):
+        raise ValueError("Kolejność sesji musi zawierać dodatnie całkowite identyfikatory.")
+    return list(dict.fromkeys(value))
+
+
+def session_order(mode, ids, order):
+    mode = scope_mode(mode)
+    if mode == "legacy":
+        if order is not None:
+            raise ValueError("Kolejność sesji wymaga trybu visible albo selected.")
+        return []
+    order = ordered_ids(order)
+    if not order or set(order) != set(ids):
+        raise ValueError("Kolejność sesji musi obejmować dokładnie wskazane nagrania.")
+    return order
+
+
+def validate_selection(db, kind, ids):
+    if not ids:
+        return
+    selected = db.execute("SELECT id,kind FROM jobs WHERE id IN (SELECT value FROM json_each(?))",
+                          (json.dumps(ids),)).fetchall()
+    if len(selected) != len(ids) or any(kind != "all" and row["kind"] != kind for row in selected):
+        raise ValueError("Wybrane identyfikatory nie należą do wskazanego rodzaju kolejki.")
 
 
 def scope_filter(kind, ids, *, enabled=False):
@@ -122,6 +161,7 @@ class Store:
                     state TEXT DEFAULT 'idle', pid INTEGER, heartbeat TEXT,
                     current_id INTEGER, message TEXT DEFAULT '',
                     scope_kind TEXT NOT NULL DEFAULT 'all', scope_ids TEXT NOT NULL DEFAULT '[]'
+                    ,order_ids TEXT NOT NULL DEFAULT '[]', scope_mode TEXT NOT NULL DEFAULT 'legacy'
                 );
                 INSERT OR IGNORE INTO control(id) VALUES(1);
                 CREATE TABLE IF NOT EXISTS imports (
@@ -140,6 +180,10 @@ class Store:
                 db.execute("ALTER TABLE control ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'all'")
             if "scope_ids" not in columns:
                 db.execute("ALTER TABLE control ADD COLUMN scope_ids TEXT NOT NULL DEFAULT '[]'")
+            if "order_ids" not in columns:
+                db.execute("ALTER TABLE control ADD COLUMN order_ids TEXT NOT NULL DEFAULT '[]'")
+            if "scope_mode" not in columns:
+                db.execute("ALTER TABLE control ADD COLUMN scope_mode TEXT NOT NULL DEFAULT 'legacy'")
             job_columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
             if "output_root" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN output_root TEXT")
@@ -211,13 +255,17 @@ class Store:
                        (*values.values(), job_id))
 
     def control(self, **values):
-        allowed = {"stop", "state", "pid", "heartbeat", "current_id", "message", "scope_kind", "scope_ids"}
+        allowed = {"stop", "state", "pid", "heartbeat", "current_id", "message", "scope_kind", "scope_ids", "order_ids", "scope_mode"}
         if not values.keys() <= allowed:
             raise ValueError("Niepoprawne pola sterowania.")
         if "scope_kind" in values:
             values["scope_kind"] = scope_kind(values["scope_kind"])
         if "scope_ids" in values:
             values["scope_ids"] = json.dumps(scope_ids(values["scope_ids"]))
+        if "order_ids" in values:
+            values["order_ids"] = json.dumps(ordered_ids(values["order_ids"]))
+        if "scope_mode" in values:
+            values["scope_mode"] = scope_mode(values["scope_mode"])
         with self.connect() as db:
             if values:
                 db.execute("UPDATE control SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=1",
@@ -231,12 +279,17 @@ class Store:
             control = db.execute(SELECT_CONTROL).fetchone()
             if control["stop"]:
                 return None
-            predicate, parameters = scope_filter(control["scope_kind"], control["scope_ids"], enabled=True)
+            snapshot = control["scope_mode"] != "legacy"
+            predicate, parameters = scope_filter(control["scope_kind"], [] if snapshot else control["scope_ids"], enabled=True)
             if excluded:
-                predicate += " AND id NOT IN (" + ",".join("?" for _ in excluded) + ")"
-                parameters.extend(sorted(excluded))
-            row = db.execute("SELECT * FROM jobs WHERE status='pending' AND " + predicate +
-                " ORDER BY CASE WHEN date='' THEN 1 ELSE 0 END,date,id LIMIT 1", parameters).fetchone()
+                predicate += " AND jobs.id NOT IN (SELECT value FROM json_each(?))"
+                parameters.append(json.dumps(sorted(excluded)))
+            joined = " JOIN json_each(?) AS sequence ON jobs.id=sequence.value" if snapshot else ""
+            order = "CAST(sequence.key AS INTEGER)" if snapshot else "CASE WHEN date='' THEN 1 ELSE 0 END,date,jobs.id"
+            if snapshot:
+                parameters.insert(0, control["order_ids"])
+            row = db.execute("SELECT jobs.* FROM jobs" + joined + " WHERE status='pending' AND " + predicate +
+                " ORDER BY " + order + " LIMIT 1", parameters).fetchone()
             if not row:
                 return None
             db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (now(), row["id"]))
@@ -251,22 +304,20 @@ class Store:
             db.execute("UPDATE jobs SET status='pending',stage='Wznawianie' WHERE status='running' AND " + predicate,
                        parameters)
 
-    def start(self, kind="all", job_ids=None):
+    def start(self, kind="all", job_ids=None, *, order_ids=None, scope_mode="legacy"):
         kind = scope_kind(kind)
         ids = [] if job_ids is None else scope_ids(job_ids)
         if job_ids is not None and not ids:
             raise ValueError("Zaznacz przynajmniej jedno nagranie do uruchomienia.")
+        order = session_order(scope_mode, ids, order_ids)
         predicate, parameters = scope_filter(kind, ids, enabled=True)
         with self.connect() as db:
             db.execute(BEGIN_WRITE)
-            if ids:
-                selected = db.execute("SELECT id,kind FROM jobs WHERE id IN (" + ",".join("?" for _ in ids) + ")", ids).fetchall()
-                if len(selected) != len(ids) or any(kind != "all" and row["kind"] != kind for row in selected):
-                    raise ValueError("Wybrane identyfikatory nie należą do wskazanego rodzaju kolejki.")
+            validate_selection(db, kind, ids)
             db.execute("UPDATE jobs SET status='pending',stage='Oczekuje na wznowienie' WHERE (status IN ('blocked','partial') OR "
                        "(status='error' AND stage='Wymaga działania')) AND " + predicate, parameters)
-            db.execute("UPDATE control SET stop=0,message='',scope_kind=?,scope_ids=? WHERE id=1",
-                       (kind, json.dumps(ids)))
+            db.execute("UPDATE control SET stop=0,message='',scope_kind=?,scope_ids=?,order_ids=?,scope_mode=? WHERE id=1",
+                       (kind, json.dumps(ids), json.dumps(order), scope_mode))
 
     def retry(self, ids=None):
         with self.connect() as db:

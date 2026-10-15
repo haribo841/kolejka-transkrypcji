@@ -52,9 +52,9 @@ def export(folder, report, execution_signature, *, complete=True):
     report["complete"] = complete
     lines = [f"{report['title']}\n"]
     if not complete:
-        lines.append(f"[WYNIK CZĘŚCIOWY: do {timestamp(duration)} z {timestamp(report['duration'])}]\n")
-        lines.append("Przy następnym Start program podejmie brakującą część.\n\n")
-        lines.append("Przyczyna: " + report.get("incomplete_reason", {}).get("message", "Niepełne audio.") + "\n\n")
+        lines.extend((f"[WYNIK CZĘŚCIOWY: do {timestamp(duration)} z {timestamp(report['duration'])}]\n",
+                      "Przy następnym Start program podejmie brakującą część.\n\n",
+                      "Przyczyna: " + report.get("incomplete_reason", {}).get("message", "Niepełne audio.") + "\n\n"))
     srt, vtt = [], ["WEBVTT\n\n"]
     cue_number = 0
     for segment in segments:

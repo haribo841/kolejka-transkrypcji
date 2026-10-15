@@ -82,11 +82,13 @@ class LocalTabTests(unittest.TestCase):
         before = self.app.store.control()
         with patch("batch.gui.preflight") as preflight, patch("batch.gui.launch") as launch:
             self.app.local_tab.start()
-            launch.assert_called_once_with(self.root, kind="local", job_ids=None)
+            launch.assert_called_once_with(self.root, kind="local", job_ids=self.local_ids,
+                                           order_ids=self.local_ids, scope_mode="visible")
             self.assertEqual(preflight.call_args.kwargs, {"kind": "local"})
         with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
             self.app.start()
-            launch.assert_called_once_with(self.root, kind="youtube", job_ids=None)
+            launch.assert_called_once_with(self.root, kind="youtube", job_ids=[self.youtube_id],
+                                           order_ids=[self.youtube_id], scope_mode="visible")
         self.assertEqual(self.app.store.control(), before)
         self.assertTrue(all(job["enabled"] for job in self.app.store.jobs()))
 
@@ -94,7 +96,8 @@ class LocalTabTests(unittest.TestCase):
         self.app.local_tab.tree.selection_set(str(self.local_ids[1]))
         with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
             self.app.local_tab.start_selected()
-            launch.assert_called_once_with(self.root, kind="local", job_ids=[self.local_ids[1]])
+            launch.assert_called_once_with(self.root, kind="local", job_ids=[self.local_ids[1]],
+                                           order_ids=[self.local_ids[1]], scope_mode="selected")
         self.assertTrue(all(job["enabled"] for job in self.app.store.jobs()))
 
     def test_empty_local_selection_does_not_start(self):
@@ -106,14 +109,16 @@ class LocalTabTests(unittest.TestCase):
         self.app.local_tab.tree.selection_set(str(self.local_ids[1]))
         with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
             self.app.local_tab.start()
-        launch.assert_called_once_with(self.root, kind="local", job_ids=None)
+        launch.assert_called_once_with(self.root, kind="local", job_ids=self.local_ids,
+                                       order_ids=self.local_ids, scope_mode="visible")
 
     def test_idle_session_can_resume_abandoned_running_local_jobs(self):
         for ident in self.local_ids:
             self.app.store.update(ident, status="running", stage="Transkrypcja")
         with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
             self.app.local_tab.start()
-            launch.assert_called_once_with(self.root, kind="local", job_ids=None)
+            launch.assert_called_once_with(self.root, kind="local", job_ids=self.local_ids,
+                                           order_ids=self.local_ids, scope_mode="visible")
 
     def test_start_while_importing_or_processing_does_not_change_queue(self):
         before = self.app.store.control()

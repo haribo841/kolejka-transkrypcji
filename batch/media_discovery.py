@@ -25,7 +25,7 @@ TYPESCRIPT_SOURCE = re.compile(
     r")",
     re.MULTILINE,
 )
-QT_TRANSLATION = re.compile(r"<(?:!DOCTYPE\s+TS\b|TS(?:\s|>))")
+QT_TRANSLATION = re.compile(r"<(?:!DOCTYPE\s+TS\b|TS[\s>])")
 
 
 def _path_stat(path):

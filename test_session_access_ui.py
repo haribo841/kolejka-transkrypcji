@@ -116,7 +116,8 @@ class SessionAccessUITests(unittest.TestCase):
         process.poll.return_value = None
         with patch("batch.gui.preflight"), patch("batch.gui.check_destination"), patch("batch.gui.launch", return_value=process) as launch:
             button.invoke()
-            launch.assert_called_once_with(self.root, kind="local", job_ids=[ident])
+            launch.assert_called_once_with(self.root, kind="local", job_ids=[ident],
+                                           order_ids=[ident], scope_mode="selected")
             self.assertTrue(button.instate(["disabled", "pressed"]))
             self.assertTrue(self.app.local_tab.controls["start"].instate(["disabled", "!pressed"]))
         lock = WorkerLock(self.root)
