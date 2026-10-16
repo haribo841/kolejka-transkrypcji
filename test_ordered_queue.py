@@ -119,13 +119,15 @@ class OrderedQueueTests(unittest.TestCase):
         for ids, order, mode in cases:
             with self.subTest(ids=ids, order=order, mode=mode), self.assertRaises(ValueError):
                 self.store.start(kind="local", job_ids=ids, order_ids=order, scope_mode=mode)
-            self.assertEqual((self.store.control(), self.store.jobs()), before)
+            self.assertEqual(self.store.control(), before[0])
+            self.assertEqual(self.store.jobs(), before[1])
         self.store.add_many([{"identity": "yt:abcdefghijk", "kind": "youtube", "title": "video", "source": "offline"}])
         youtube = next(job["id"] for job in self.store.jobs() if job["kind"] == "youtube")
         before = self.store.control(), self.store.jobs()
         with self.assertRaises(ValueError):
             self.start([youtube])
-        self.assertEqual((self.store.control(), self.store.jobs()), before)
+        self.assertEqual(self.store.control(), before[0])
+        self.assertEqual(self.store.jobs(), before[1])
 
     def test_control_order_validation_preserves_first_order(self):
         before = self.store.control()

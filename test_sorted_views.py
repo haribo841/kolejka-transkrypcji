@@ -124,7 +124,8 @@ class SortedQueueIntegrationTests(unittest.TestCase):
         before = self.app.store.control(), self.app.store.jobs()
         captured = self.start_and_capture("local")
         self.assert_snapshot(captured, "local", self.ids("local", "alpha", "lodz", "zeta", "unknown"), "visible")
-        self.assertEqual((self.app.store.control(), self.app.store.jobs()), before)
+        self.assertEqual(self.app.store.control(), before[0])
+        self.assertEqual(self.app.store.jobs(), before[1])
 
     def test_youtube_main_start_obeys_search_dates_status_and_descending_view(self):
         self.filtered("youtube")
@@ -196,7 +197,8 @@ class SortedQueueIntegrationTests(unittest.TestCase):
         self.assertEqual(actual, expected)
         self.assertTrue(self.app.table_view.skip_done.get())
         self.assertFalse(self.app.local_tab.table_view.skip_done.get())
-        self.assertEqual((self.app.store.control(), self.app.store.jobs()), before)
+        self.assertEqual(self.app.store.control(), before[0])
+        self.assertEqual(self.app.store.jobs(), before[1])
 
     def test_skip_done_groups_results_only_while_a_sort_is_active_and_never_hides_them(self):
         for kind in ("local", "youtube"):
@@ -281,7 +283,8 @@ class SortedQueueIntegrationTests(unittest.TestCase):
                 self.app.local_tab.controls["start"].invoke()
                 self.app.local_tab.controls["start_selected"].invoke()
                 launch.assert_not_called()
-            self.assertEqual((self.app.store.control(), self.app.store.jobs()), before)
+            self.assertEqual(self.app.store.control(), before[0])
+            self.assertEqual(self.app.store.jobs(), before[1])
         finally:
             lock.close()
 
