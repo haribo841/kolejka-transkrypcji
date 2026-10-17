@@ -26,6 +26,7 @@ from .worker import launch, preflight
 from .store import now
 from .youtube_access import SessionError, error_message, preferences as youtube_preferences
 from .session_button import SessionButton
+from .output_fallback import planned_output
 
 
 MODEL_STATE_FILE = 'konfiguracja-modelu.json'
@@ -50,6 +51,7 @@ class QueueWindow:
         self.selection_queue = self.session_view.get("queue", "youtube")
         self.busy_import = self.readiness_busy = self.metadata_busy = self.closing = False
         self.start_pending = self.launch_kind = self.launch_process = None
+        self.start_check_thread = None
         self.launch_deadline = 0
         self.start_scope_ids = None
         self.start_scope_mode = "visible"
@@ -562,6 +564,8 @@ class QueueWindow:
                 self.readiness_key = None
         elif kind == "metadata":
             self.metadata_busy = False
+        elif kind == "start_checked":
+            self.complete_start(value)
         elif kind == "error":
             note.set("Operacja przerwana: " + str(value))
             messagebox.showerror("Nie udało się wykonać operacji", str(value), parent=self.window)
@@ -630,19 +634,59 @@ class QueueWindow:
         self.start_scope_mode = "selected" if job_ids is not None else "visible"
         self.start_scope_ids = job_ids
         self.update_session_controls()
-        self.window.update_idletasks()
         try:
-            if not self.ready_to_start(kind):
-                return
             pending = self.start_candidates(kind, job_ids)
             if not pending:
                 messagebox.showinfo("Kolejka", "Nie ma włączonych nagrań oczekujących w tym zakresie. Nieudane możesz ponowić odpowiednim przyciskiem.", parent=self.window)
+                self.start_pending = None
+                self.update_session_controls()
                 return
-            check_destination(job_folder(self.root, pending[0]), self.config["min_free_gb"])
-            ordered_ids = [job["id"] for job in pending]
-            self.start_scope_ids = ordered_ids
-            self.launch_process = launch(self.root, kind=kind, job_ids=ordered_ids,
-                                         order_ids=ordered_ids, scope_mode=self.start_scope_mode)
+            self.start_scope_ids = [job["id"] for job in pending]
+            config = settings(self.root)
+            request = {"kind": kind, "ids": self.start_scope_ids, "mode": self.start_scope_mode,
+                       "config": config, "first": pending[0]}
+            (self.local_tab.note if kind == "local" else self.source_note).set("Sprawdzanie konfiguracji i folderu wyników w tle...")
+            self.start_check_thread = threading.Thread(target=self.check_start, args=(request,), daemon=True)
+            self.start_check_thread.start()
+        except Exception as exc:
+            self.start_pending = None
+            self.record_start_error(kind, str(exc))
+            messagebox.showerror("Kolejka nie została uruchomiona", str(exc), parent=self.window)
+            self.update_session_controls()
+
+    def check_start(self, request):
+        """Filesystem and environment probes must never block the Tk thread."""
+        try:
+            config, kind = request["config"], request["kind"]
+            request["readiness"] = collect_readiness(config, self.root)
+            ready, _ = readiness_summary(request["readiness"], kind)
+            if ready:
+                preflight(config, self.root, kind=kind)
+                check_destination(planned_output(self.root, request["first"])[2], config["min_free_gb"])
+        except Exception as exc:
+            request["error"] = str(exc)
+        self.events.put(("start_checked", request))
+
+    def complete_start(self, request):
+        if self.closing:
+            return
+        kind = request["kind"]
+        try:
+            if request.get("error"):
+                raise RuntimeError(request["error"])
+            if request["config"] != settings(self.root):
+                raise RuntimeError("Ustawienia zmieniły się podczas sprawdzania. Naciśnij Start ponownie.")
+            self.config, self.readiness = request["config"], request["readiness"]
+            self.config_tab.update(self.readiness)
+            ready, message = readiness_summary(self.readiness, kind)
+            if not ready:
+                self.open_configuration()
+                self.record_start_error(kind, message)
+                return
+            if WorkerLock.busy(self.root / "konfiguracja"):
+                raise RuntimeError("Trwa próba lub konfiguracja modeli. Poczekaj na zakończenie i naciśnij Start ponownie.")
+            self.launch_process = launch(self.root, kind=kind, job_ids=request["ids"],
+                                         order_ids=request["ids"], scope_mode=request["mode"])
             self.launch_kind, self.launch_deadline = kind, time.monotonic() + 10
             atomic_json(self.root / START_ERROR_FILE, {"at": now(), "kind": kind, "message": ""})
         except Exception as exc:
@@ -691,19 +735,6 @@ class QueueWindow:
             self.help_status.set("Poczekaj na zakończenie lub anulowanie testu YouTube, a następnie naciśnij Start/Wznów.")
             return True
         return False
-
-    def ready_to_start(self, kind):
-        self.config = settings(self.root)
-        result = collect_readiness(self.config, self.root)
-        self.readiness = result
-        self.config_tab.update(result)
-        ready, message = readiness_summary(result, kind)
-        if not ready:
-            self.open_configuration()
-            self.record_start_error(kind, message)
-        else:
-            preflight(self.config, self.root, kind=kind)
-        return ready
 
     def stop(self, kind="youtube"):
         control = self.store.control()
@@ -771,7 +802,7 @@ class QueueWindow:
             self.background(lambda: (self.store.export_csv(path, kind=kind), f"Zapisano raport: {path}")[1], note=note)
 
     def setup_process(self, request):
-        if WorkerLock.busy(self.root):
+        if self.start_pending or WorkerLock.busy(self.root):
             messagebox.showinfo("Konfiguracja", "Najpierw dokończ bieżące nagranie i zatrzymaj kolejkę.", parent=self.window)
             return False
         if WorkerLock.busy(self.root / "konfiguracja"):
@@ -811,7 +842,7 @@ class QueueWindow:
         self.request_readiness(force=True)
 
     def setup_uvr(self):
-        if WorkerLock.busy(self.root) or WorkerLock.busy(self.root / "konfiguracja"):
+        if self.start_pending or WorkerLock.busy(self.root) or WorkerLock.busy(self.root / "konfiguracja"):
             self.open_configuration()
             self.config_tab.last_test.set("Poczekaj na zakończenie bieżącej sesji lub próby.")
             return
@@ -829,7 +860,7 @@ class QueueWindow:
                 creationflags=NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0))
 
     def test_local(self):
-        if WorkerLock.busy(self.root):
+        if self.start_pending or WorkerLock.busy(self.root):
             messagebox.showinfo("Próba", "Najpierw dokończ bieżące nagranie i zatrzymaj sesję.", parent=self.window)
             return
         ids = self.selected()

@@ -125,16 +125,15 @@ class MediaFormatTests(unittest.TestCase):
         self.ffmpeg("-f", "lavfi", "-i", "color=size=32x32:duration=0.5", "-an", str(silent_video))
         corrupt = self.base / "uszkodzony.mkv"
         corrupt.write_bytes(b"broken multimedia data")
-        with self.assertRaisesRegex(MediaError, "nie zawiera ścieżki audio"):
-            media_metadata(silent_video, self.config)
+        self.assertEqual(media_metadata(silent_video, self.config)["empty_audio"], "no_audio_stream")
         with self.assertRaisesRegex(MediaError, "FFprobe"):
             media_metadata(corrupt, self.config)
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(tmp)
             summary = import_local(store, [silent_video, corrupt, self.inputs["mkv"]], config=self.config,
                                    output_mode="beside")
-            self.assertEqual((summary["added"], summary["errors"]), (3, 2))
-            self.assertEqual(sorted(j["status"] for j in store.jobs()), ["error", "no_audio", "pending"])
+            self.assertEqual((summary["added"], summary["errors"]), (3, 1))
+            self.assertEqual(sorted(j["status"] for j in store.jobs()), ["error", "pending", "pending"])
             self.assertTrue(all(j["error"] for j in store.jobs() if j["status"] == "error"))
             before = store.jobs()
             import_local(store, [self.inputs["mkv"]], config=self.config, output_mode="central")

@@ -17,6 +17,7 @@ from .ui_help import (HELP, Tooltip, collapsible_help, duration_text, help_butto
 from .table_view import TableView
 from .local_outputs import OUTPUT_MODES, scan_media
 from .session_button import SessionButton
+from .output_fallback import planned_output
 
 ENABLED_STATE = "!disabled"
 LOCAL_IMPORT_REPORT = "ostatni-import-lokalny.json"
@@ -411,7 +412,7 @@ class LocalQueueTab:
     def result_location(self, job):
         meta = json.loads(job["source_meta"])
         if meta.get("output_error"):
-            return "Wymagany krótszy folder zamiast: " + str(meta.get("intended_output_root", ""))
+            return "Krótszy folder przy Start: " + str(planned_output(self.app.root, job)[2])
         return str(job_folder(self.app.root, job))
 
     @staticmethod
@@ -422,7 +423,9 @@ class LocalQueueTab:
         if job["status"] == "no_audio":
             return "\nTen plik nie ma dźwięku. Dodaj nagranie zawierające ścieżkę audio; ponowienie nie naprawi źródła."
         if meta.get("output_error"):
-            return '\nWybierz Folder centralny lub Wskazany folder, potem kliknij Zmień miejsce wyników dla tej pozycji.'
+            return '\nPrzy następnym Start program automatycznie wybierze krótszy folder wyników.'
+        if meta.get("output_fallback"):
+            return '\nAutomatycznie wybrano krótszy folder wyników: ' + meta['output_fallback']['selected']
         return ""
 
     def start(self):
@@ -491,7 +494,8 @@ class LocalQueueTab:
         if len(ids) != 1:
             return
         folder = job_folder(self.app.root, self.app.jobs[ids[0]]) / 'robocze'
-        path = next((p for p in (folder / 'blad.txt', folder / 'uvr.log', folder / 'ffmpeg.log', folder / 'pyannote.log') if p.is_file()), None)
+        fallback = self.app.root / 'bledy' / f'nagranie-{ids[0]}.txt'
+        path = next((p for p in (folder / 'blad.txt', folder / 'uvr.log', folder / 'ffmpeg.log', folder / 'pyannote.log', fallback) if p.is_file()), None)
         if path:
             os.startfile(str(path))
         else:

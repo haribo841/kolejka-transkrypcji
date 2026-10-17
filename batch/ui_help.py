@@ -8,6 +8,7 @@ from tkinter import ttk
 
 def startable(job):
     return bool(job["enabled"] and (job["status"] in {"pending", "partial", "blocked", "running"} or
+                                    (job["status"] == "output_required" and job.get("error_code") == "output_path") or
                                     (job["status"] == "error" and job["stage"] == "Wymaga działania")))
 
 

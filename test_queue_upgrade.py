@@ -306,10 +306,12 @@ class NavigationTests(unittest.TestCase):
         self.assertFalse(self.app.notebook.tooltip.allow_popup)
 
     def test_failure_is_durable_and_never_claims_a_job(self):
+        from test_support import wait_for_start
         before = self.app.store.control()
         with patch("batch.gui.preflight", side_effect=ResourceError("Testowy błąd procesu")), \
                 patch("batch.gui.messagebox.showerror") as popup, patch("batch.gui.launch") as launch:
             self.app.start()
+            wait_for_start(self.app)
             launch.assert_not_called()
             popup.assert_called_once()
         saved = json.loads((self.root / "ostatni-blad-start.json").read_text(encoding="utf-8"))

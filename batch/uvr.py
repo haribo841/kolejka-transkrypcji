@@ -7,7 +7,7 @@ import shutil
 import subprocess
 
 from .common import APP, NO_WINDOW, ResourceError, atomic_json, check_disk, digest, read_json, signature
-from .media import probe
+from .media import EmptyAudio, probe
 from .paths import child_path, input_file, local_path, media_tool, output_file
 from .processes import ChildGuard
 from .failures import JobError, resource_failure
@@ -43,19 +43,24 @@ def separate(source, work, folder, track, config, progress, *, recovery_only=Fal
             cwd=APP, stdout=subprocess.PIPE, stderr=log, encoding="utf-8", errors="replace", env=env,
             creationflags=NO_WINDOW)
         error, failure_scope, failure_code = "", "job", "uvr_failed"
+        empty = None
         with ChildGuard(process):
             for line in process.stdout:
                 try:
                     event = json.loads(line)
                 except ValueError:
                     continue
-                if "error" in event:
+                if event.get("empty_audio"):
+                    empty = event
+                elif "error" in event:
                     error = event["error"]
                     failure_scope, failure_code = event.get("scope", "job"), event.get("code", "uvr_failed")
                 else:
                     progress(event.get("message", "Separacja UVR"), event.get("percent", 0))
             code = process.wait()
             process.stdout.close()
+    if not code and empty is not None:
+        raise EmptyAudio(empty.get("duration"), empty.get("reason", "decoder_eof"))
     if code:
         message = "Separacja UVR nie została ukończona: " + (error or "sprawdź uvr.log")
         if failure_scope == "session":
@@ -96,7 +101,7 @@ def archive_source(source, folder, track, config):
     cached = cached_archive(audio_dir, source_hash, track)
     if cached is not None:
         return cached
-    metadata = probe(source, config)
+    metadata = probe(source, config) if source.stat().st_size else {"streams": []}
     muxed = any(s.get("codec_type") == "video" for s in metadata["streams"])
     destination = output_file(child_path(audio_dir, "zrodlo.mka" if muxed else "zrodlo" + source.suffix.lower()))
     temporary = output_file(destination.with_name(destination.name + ".partial"))

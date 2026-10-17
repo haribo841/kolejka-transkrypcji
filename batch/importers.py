@@ -179,12 +179,11 @@ def validate_local_output(store, entry):
         return entry
     try:
         compact_folder(entry["title"], entry["identity"], entry["output_root"])
-    except ResourceError as error:
-        entry["meta"].update(output_error=str(error), intended_output_root=entry["output_root"])
-        entry["output_root"] = None
-        if entry["status"] != "no_audio":
-            entry.update(status="output_required", error=str(error), error_code="output_path",
-                         stage="Wybierz miejsce wyników")
+    except ResourceError:
+        from .output_fallback import fallback_destination, fallback_metadata
+        root, name = fallback_destination(store.root, entry["title"], entry["identity"])
+        entry["meta"] = fallback_metadata(entry["meta"], entry["output_root"], root / name)
+        entry["output_root"] = str(root)
     return entry
 
 

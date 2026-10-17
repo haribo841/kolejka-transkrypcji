@@ -19,6 +19,14 @@ class MediaError(RuntimeError):
         self.status = status
 
 
+class EmptyAudio(RuntimeError):
+    """A readable source with no audio samples is a valid empty transcription."""
+    def __init__(self, duration=0, reason="decoder_eof"):
+        super().__init__("Brak próbek audio lub wypowiedzi do transkrypcji.")
+        self.duration = float(duration or 0)
+        self.reason = reason
+
+
 def classify_error(message):
     message = message.casefold()
     if any(part in message for part in ("not a bot", "confirm you're not", "too many requests",
@@ -152,9 +160,16 @@ def positive_duration(value):
 
 
 def media_metadata(source, config):
+    if input_file(source).stat().st_size == 0:
+        return {"duration": 0.0, "audio_tracks": [], "has_video": False, "container": "",
+                "empty_audio": "empty_file"}
     data = probe(source, config)
     streams = [s for s in data.get("streams", []) if s.get("codec_type") == "audio"]
     if not streams:
+        if any(s.get("codec_type") == "video" for s in data.get("streams", [])):
+            return {"duration": positive_duration(data.get("format", {}).get("duration")) or 0.0,
+                    "audio_tracks": [], "has_video": True,
+                    "container": data.get("format", {}).get("format_name", ""), "empty_audio": "no_audio_stream"}
         raise MediaError("Plik nie zawiera ścieżki audio. Wybierz nagranie z dźwiękiem.")
     if any(s.get("codec_name") in {None, "unknown"} for s in streams):
         raise MediaError("FFprobe nie rozpoznaje kodeka audio tego pliku.")
@@ -235,8 +250,10 @@ def decode(source, work, config, track, progress):
             raise ResourceError(message)
         raise MediaError("FFmpeg: " + message)
     size = temporary.stat().st_size
-    if not size or size % 4:
+    if size % 4:
         raise MediaError("Brak poprawnych próbek audio.")
+    if not size:
+        raise EmptyAudio(clock["video_duration"] or duration)
     pad_verified_tail(temporary, clock, config, work)
     size = temporary.stat().st_size
     validate_pcm(temporary)

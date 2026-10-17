@@ -88,8 +88,9 @@ class VocalRecovery:
         stage = child_path(self.directory, "biezacy")
         stage.mkdir(exist_ok=True)
         prepared = prepare_clock_block(self.pcm, self.clock, stage, block)
-        if round(block["start"] * UVR_RATE) >= self.clock["audio_frames"]:
-            return sf.read(prepared, dtype="float32", always_2d=True)[0]
+        original = sf.read(prepared, dtype="float32", always_2d=True)[0]
+        if not len(original) or float(np.max(np.abs(original))) < 1e-7:
+            return original
         if self.engine is None:
             try:
                 self.engine = self.api.separator(self.config, stage)

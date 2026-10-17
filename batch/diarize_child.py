@@ -65,7 +65,9 @@ def prepare_pipeline(model, pcm, work):
     pipeline.to(torch.device(device["device"]))
     if device["device"] == "cuda":
         try:
-            test = torch.from_numpy(np.fromfile(pcm, dtype="<f4", count=RATE * 5)).unsqueeze(0)
+            sample = np.fromfile(pcm, dtype="<f4", count=RATE * 5)
+            sample = np.pad(sample, (0, max(0, RATE - len(sample))))
+            test = torch.from_numpy(sample).unsqueeze(0)
             pipeline({"waveform": test, "sample_rate": RATE})
             torch.cuda.synchronize()
         except Exception as exc:
@@ -86,8 +88,9 @@ def progress_hook(message, index, block_count):
 
 def annotation_turns(annotation, block):
     return [{"start": block["start"] + float(turn.start),
-             "end": block["start"] + float(turn.end), "speaker": str(label)}
-            for turn, _, label in annotation.itertracks(yield_label=True)]
+             "end": min(block["end"], block["start"] + float(turn.end)), "speaker": str(label)}
+            for turn, _, label in annotation.itertracks(yield_label=True)
+            if 0 <= float(turn.start) < min(float(turn.end), block["end"] - block["start"])]
 
 
 def speaker_embeddings(result):
@@ -135,6 +138,7 @@ class Diarizer:
         hook = progress_hook(message, block["index"], count)
         with pcm_samples(self.request["pcm"], block) as audio:
             samples = np.array(audio, copy=True)
+        samples = np.pad(samples, (0, max(0, RATE - len(samples))))
         waveform = torch.from_numpy(samples).unsqueeze(0)
         result = self.inference(waveform, hook)
         return {"signature": key, "block": block, "turns": annotation_turns(result.speaker_diarization, block),

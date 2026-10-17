@@ -17,6 +17,7 @@ from .common import (NO_WINDOW, WorkerLock, atomic_json, check_disk, digest,
 from .paths import child_path, input_file, local_path, media_tool, output_file, within_root
 from .processes import ChildGuard
 from .failures import resource_failure
+from .media import EmptyAudio
 
 
 UVR_STATE_FILE = 'konfiguracja-uvr.json'
@@ -194,6 +195,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except EmptyAudio as exc:
+        print(json.dumps({"empty_audio": True, "duration": exc.duration, "reason": exc.reason}), flush=True)
     except Exception as exc:
         print(json.dumps({"error": str(exc), "code": getattr(exc, "code", "uvr_failed"),
                           "scope": "session" if resource_failure(exc) else "job"}, ensure_ascii=False), flush=True)

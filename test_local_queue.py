@@ -11,6 +11,7 @@ from unittest.mock import patch
 from batch.common import WorkerLock, atomic_json, defaults, digest
 from batch.gui import Window
 from batch.local_tab import folder_media
+from test_support import wait_for_start
 
 
 class FolderTests(unittest.TestCase):
@@ -82,11 +83,13 @@ class LocalTabTests(unittest.TestCase):
         before = self.app.store.control()
         with patch("batch.gui.preflight") as preflight, patch("batch.gui.launch") as launch:
             self.app.local_tab.start()
+            wait_for_start(self.app)
             launch.assert_called_once_with(self.root, kind="local", job_ids=self.local_ids,
                                            order_ids=self.local_ids, scope_mode="visible")
             self.assertEqual(preflight.call_args.kwargs, {"kind": "local"})
         with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
             self.app.start()
+            wait_for_start(self.app)
             launch.assert_called_once_with(self.root, kind="youtube", job_ids=[self.youtube_id],
                                            order_ids=[self.youtube_id], scope_mode="visible")
         self.assertEqual(self.app.store.control(), before)
@@ -96,6 +99,7 @@ class LocalTabTests(unittest.TestCase):
         self.app.local_tab.tree.selection_set(str(self.local_ids[1]))
         with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
             self.app.local_tab.start_selected()
+            wait_for_start(self.app)
             launch.assert_called_once_with(self.root, kind="local", job_ids=[self.local_ids[1]],
                                            order_ids=[self.local_ids[1]], scope_mode="selected")
         self.assertTrue(all(job["enabled"] for job in self.app.store.jobs()))
@@ -109,6 +113,7 @@ class LocalTabTests(unittest.TestCase):
         self.app.local_tab.tree.selection_set(str(self.local_ids[1]))
         with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
             self.app.local_tab.start()
+            wait_for_start(self.app)
         launch.assert_called_once_with(self.root, kind="local", job_ids=self.local_ids,
                                        order_ids=self.local_ids, scope_mode="visible")
 
@@ -117,6 +122,7 @@ class LocalTabTests(unittest.TestCase):
             self.app.store.update(ident, status="running", stage="Transkrypcja")
         with patch("batch.gui.preflight"), patch("batch.gui.launch") as launch:
             self.app.local_tab.start()
+            wait_for_start(self.app)
             launch.assert_called_once_with(self.root, kind="local", job_ids=self.local_ids,
                                            order_ids=self.local_ids, scope_mode="visible")
 
@@ -236,9 +242,9 @@ class LocalTabTests(unittest.TestCase):
         tab.render()
         tab.tree.selection_set(str(job["id"]))
         tab.show_detail()
-        self.assertIn("Wymagany krótszy folder", tab.detail.get())
-        self.assertIn("Zmień miejsce wyników", tab.detail.get())
-        self.assertFalse(tab.eligible(self.app.jobs[job["id"]]))
+        self.assertIn("Krótszy folder przy Start", tab.detail.get())
+        self.assertIn("automatycznie", tab.detail.get())
+        self.assertTrue(tab.eligible(self.app.jobs[job["id"]]))
         tab.output_mode.set("Folder centralny")
         with patch("batch.gui.launch") as launch:
             tab.change_output()

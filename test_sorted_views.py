@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from batch.common import WorkerLock, atomic_json, defaults
 from batch.gui import Window
+from test_support import wait_for_start
 
 
 def ready_fixture(*_args):
@@ -110,6 +111,7 @@ class SortedQueueIntegrationTests(unittest.TestCase):
                 (self.app.local_tab.start_selected if selected else self.app.local_tab.start)()
             else:
                 (self.app.start_youtube_selected if selected else self.app.start)()
+            wait_for_start(self.app)
             launch.assert_called_once()
             return launch.call_args
 

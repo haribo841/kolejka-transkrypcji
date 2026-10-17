@@ -56,7 +56,9 @@ class ContinuousQueueTests(Fixture):
         self.assertEqual([j["status"] for j in store.jobs()], ["done", "error", "partial", "done"])
         self.assertEqual(len(seen), 4)
         self.assertEqual(store.control()["state"], "idle")
-        self.assertTrue((job_folder(self.root, store.jobs()[1]) / "robocze/blad.txt").is_file())
+        failed = store.jobs()[1]
+        self.assertTrue((self.root / "bledy" / f"nagranie-{failed['id']}.txt").is_file())
+        self.assertFalse(job_folder(self.root, failed).exists())
         store.start(kind="local")
         self.assertEqual(store.jobs()[2]["stage"], "Oczekuje na wznowienie")
         Worker(self.root, processor=process).run(check=False)

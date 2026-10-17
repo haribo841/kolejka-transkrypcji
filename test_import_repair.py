@@ -175,7 +175,7 @@ class ImportRepairTests(unittest.TestCase):
         self.assertEqual(self.store.get(pending_id), pending)
         self.assertEqual(self.store.get(done_id), before_done)
 
-    def test_unusable_output_root_preserves_a_registered_actionable_job(self):
+    def test_unusable_output_root_automatically_uses_central_destination(self):
         source = self.long_source("lesson.wav", b"intended deep source")
         original_hash = digest(source)
         before_control = self.store.control()
@@ -184,11 +184,11 @@ class ImportRepairTests(unittest.TestCase):
         job = self.store.jobs()[0]
         self.assertEqual((result["files"], result["added"], result["skipped"], result["matched_jobs"]), (1, 1, 0, 1))
         self.assertEqual((job["status"], job["error_code"], job["source"]),
-                         ("output_required", "output_path", str(source)))
-        self.assertIsNone(job["output_root"])
-        self.assertEqual(json.loads(job["source_meta"])["intended_output_root"], str(source.parent))
-        self.assertEqual(result["file_problem_counts"], {"output_path": 1})
-        self.assertEqual(result["job_problem_counts"], {"output_path": 1})
+                         ("pending", "", str(source)))
+        self.assertEqual(job["output_root"], str(self.store.root / "wyniki"))
+        self.assertEqual(json.loads(job["source_meta"])["output_fallback"]["requested"], str(source.parent))
+        self.assertEqual(result["file_problem_counts"], {})
+        self.assertEqual(result["job_problem_counts"], {})
         self.assertEqual(self.store.control(), before_control)
         self.assertEqual(digest(source), original_hash)
 
@@ -201,12 +201,11 @@ class ImportRepairTests(unittest.TestCase):
             result = import_local(self.store, [source], config={}, output_mode="beside")
         job = self.store.jobs()[0]
         metadata = json.loads(job["source_meta"])
-        self.assertEqual((job["status"], job["error_code"]), ("output_required", "output_path"))
+        self.assertEqual((job["status"], job["error_code"]), ("error", "unsupported_codec"))
         self.assertEqual((metadata["probe_error_code"], metadata["probe_error"]), ("unsupported_codec", message))
-        self.assertIn("output_error", metadata)
-        self.assertEqual(result["file_problem_counts"], {"unsupported_codec": 1, "output_path": 1})
-        self.assertEqual(self.store.retry([job["id"]]), 0)
-        self.assertEqual(self.store.get(job["id"]), job)
+        self.assertIn("output_fallback", metadata)
+        self.assertNotIn("output_error", metadata)
+        self.assertEqual(result["file_problem_counts"], {"unsupported_codec": 1})
         self.assertEqual(self.store.control(), before_control)
         self.assertEqual(self.store.change_output([job["id"]], "central"), 1)
         repaired = self.store.get(job["id"])
@@ -229,8 +228,9 @@ class ImportRepairTests(unittest.TestCase):
         metadata = json.loads(job["source_meta"])
         self.assertEqual((job["status"], job["error_code"], job["error"]), ("no_audio", "no_audio", message))
         self.assertEqual(metadata["probe_error_code"], "no_audio")
-        self.assertIn("output_error", metadata)
-        self.assertEqual(result["file_problem_counts"], {"no_audio": 1, "output_path": 1})
+        self.assertIn("output_fallback", metadata)
+        self.assertNotIn("output_error", metadata)
+        self.assertEqual(result["file_problem_counts"], {"no_audio": 1})
         self.assertEqual(self.store.retry([job["id"]]), 0)
         self.assertEqual(self.store.get(job["id"]), job)
         self.assertEqual(self.store.change_output([job["id"]], "central"), 1)

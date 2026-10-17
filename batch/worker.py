@@ -18,7 +18,8 @@ from .common import (APP, NO_WINDOW, ResourceError, WorkerLock, application_pyth
 from .diarization import run_diarization, validate_diarization
 from .exporter import export, verify_outputs
 from .result_paths import assert_output_owner, reserve_output
-from .media import MediaError, decode, download, media_metadata
+from .media import EmptyAudio, MediaError, decode, download, media_metadata
+from .output_fallback import ensure_output
 from .speakers import assign_words, cues_from_words, merge_speakers
 from .store import Store, in_scope, now, scope_kind
 from .failures import JobError, resource_failure
@@ -93,7 +94,8 @@ class Worker:
 
     def process(self, job):
         config = self.config
-        folder = job_folder(self.root, job)
+        source = self.local_source(job) if job["kind"] == "local" else None
+        folder = ensure_output(self.store, job)
         assert_output_owner(folder, job["identity"])
         reserve_output(folder, job["identity"])
         check_disk(folder, reserve_gb=config["min_free_gb"])
@@ -108,13 +110,13 @@ class Worker:
             return
         if job["kind"] == "youtube":
             source = download(job, work, config, self.progress, youtube_preferences(self.root))
-        else:
-            source = Path(job["source"])
-            if not source.is_file():
-                raise MediaError("Nie znaleziono pliku lokalnego. Dodaj ponownie jego obecną lokalizację.")
-            self.progress("Sprawdzanie oryginalnego pliku", 0)
-            if digest(source) != job["identity"].split(":", 1)[1]:
-                raise MediaError("Zawartość pliku lokalnego zmieniła się. Dodaj plik ponownie jako nowe nagranie.")
+        try:
+            self.process_audio(job, source, folder, work, execution)
+        except EmptyAudio as exc:
+            self.finish_empty(job, source, folder, work, execution, exc)
+
+    def process_audio(self, job, source, folder, work, execution):
+        config = self.config
         self.validate_audio(job, source)
         retained, uvr_report = [], None
         if config.get("keep_audio") or config.get("uvr_enabled"):
@@ -130,7 +132,7 @@ class Worker:
         complete = uvr_report.get("complete", True) if uvr_report else True
         self.store.update(job["id"], duration=full_duration)
         asr = self.asr.run(pcm, duration, pcm_key, job, work, self.progress)
-        if config["diarization"]:
+        if config["diarization"] and asr["words"]:
             diar_parts = run_diarization(pcm, duration, pcm_key, work, config, self.progress)
             self.progress("Łączenie mówców i przypisywanie słów", 0)
             diar = merge_speakers(diar_parts)
@@ -151,7 +153,39 @@ class Worker:
                   "review_warnings": [{"start": w["start"], "end": w["end"], "text": w["text"],
                                        "reason": "Słowo o nietypowo długim przedziale; sprawdź timestamp."}
                                       for w in words if w["end"] - w["start"] > 5]}
+        if not words:
+            report["no_speech_reason"] = "no_recognized_speech"
         self.finish(job, folder, work, report, execution, complete)
+        if complete and not words:
+            self.store.update(job["id"], stage="Gotowe: brak wypowiedzi")
+
+    def finish_empty(self, job, source, folder, work, execution, empty):
+        duration = empty.duration or job.get("duration") or 0.0
+        retained = []
+        if empty.reason != "no_audio_stream" and (self.config.get("keep_audio") or self.config.get("uvr_enabled")):
+            archived = archive_source(source, folder, job["audio_track"], self.config)
+            retained.append(str(archived.relative_to(folder)))
+        self.store.update(job["id"], duration=duration)
+        report = {"schema": 1, "identity": job["identity"], "title": job["title"], "source": job["source"],
+                  "source_metadata": json.loads(job["source_meta"]), "created": now(), "duration": duration,
+                  "processed_until": duration, "language": job["language"], "sample_rate": 16000,
+                  "audio_track": job["audio_track"], "settings": self.config, "words": [], "segments": [],
+                  "asr": {"words": [], "blocks": []}, "diarization_blocks": [],
+                  "diarization": {"enabled": False, "turns": [], "exclusive": [], "speakers": []},
+                  "uvr": None, "retained_audio": retained, "no_speech_reason": empty.reason,
+                  "notes": ["Nagranie poprawnie przetworzone; brak próbek audio lub wypowiedzi."]}
+        self.finish(job, folder, work, report, execution, True)
+        self.store.update(job["id"], stage="Gotowe: brak wypowiedzi")
+
+    def local_source(self, job):
+        source = Path(job["source"])
+        if not source.is_file():
+            raise MediaError("Nie znaleziono pliku lokalnego: " + str(source) +
+                             ". Dodaj folder z obecną lokalizacją nagrania; zachowamy jego postęp.")
+        self.progress("Sprawdzanie oryginalnego pliku", 0)
+        if digest(source) != job["identity"].split(":", 1)[1]:
+            raise MediaError("Zawartość pliku lokalnego zmieniła się. Dodaj plik ponownie jako nowe nagranie.")
+        return source
 
     def finish(self, job, folder, work, report, execution, complete):
         duration, full_duration = report["processed_until"], report["duration"]
@@ -175,10 +209,18 @@ class Worker:
             self.store.update(job["id"], error="Wyniki gotowe; sprzątanie wymaga ponowienia: " + str(exc))
 
     def save_error_log(self, job, message):
-        folder = job_folder(self.root, job) / "robocze"
+        destination = job_folder(self.root, job)
+        owned = destination.is_dir()
+        if owned:
+            try:
+                assert_output_owner(destination, job["identity"])
+            except (OSError, ValueError):
+                owned = False
+        folder = destination / "robocze" if owned else self.root / "bledy"
         folder.mkdir(parents=True, exist_ok=True)
         from .common import atomic_bytes
-        atomic_bytes(folder / "blad.txt", (now() + "\n" + message + "\n").encode("utf-8"))
+        name = "blad.txt" if owned else f"nagranie-{job['id']}.txt"
+        atomic_bytes(folder / name, (now() + "\n" + message + "\n").encode("utf-8"))
 
     def failure(self, job, error, code, *, stop=False, status=None):
         logging.exception("Błąd nagrania %s", job["id"])
@@ -194,12 +236,12 @@ class Worker:
 
     def validate_audio(self, job, source):
         metadata = media_metadata(source, self.config)
+        if metadata.get("empty_audio"):
+            raise EmptyAudio(metadata["duration"], metadata["empty_audio"])
         if not 0 <= job["audio_track"] < len(metadata["audio_tracks"]):
             raise MediaError("Wybrana ścieżka audio nie istnieje. Wybierz ścieżkę audio w oknie kolejki.")
         if metadata["duration"] is not None:
             self.store.update(job["id"], duration=metadata["duration"])
-        elif self.config.get("uvr_enabled"):
-            raise MediaError("Nie udało się ustalić długości audio wymaganej przez UVR. Wybierz inny plik lub wyłącz UVR dla tej sesji.")
 
     def execution_lock(self, held_lock):
         if held_lock is not None:

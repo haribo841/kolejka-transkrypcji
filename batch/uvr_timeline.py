@@ -68,8 +68,11 @@ def decode_clock(source, config, track, directory, emit):
                "-c:a", "pcm_f32le", "-f", "f32le", "-progress", "pipe:1", str(temporary)]
     execute_decoder(command, directory, config, emit)
     size = temporary.stat().st_size
-    if not size or size % 8:
+    if size % 8:
         raise JobError("Brak poprawnych próbek wybranej ścieżki audio.", "audio_decode_failed")
+    if not size:
+        from .media import EmptyAudio
+        raise EmptyAudio(metadata["video_duration"])
     os.replace(temporary, path)
     audio_frames = size // 8
     frames = max(audio_frames, round((metadata["video_duration"] or 0) * UVR_RATE))

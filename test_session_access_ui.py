@@ -11,6 +11,7 @@ from batch.common import WorkerLock, atomic_json, defaults
 from batch.gui import Window
 from batch.readiness import youtube_test_matches
 from batch.youtube_access import DEFAULTS, access_fingerprint
+from test_support import wait_for_start
 
 URL = "https://www.youtube.com/watch?v=abcdefghij0"
 READY = {"components": {key: {"status": "Próba zaliczona", "message": "Ready fixture"}
@@ -116,6 +117,7 @@ class SessionAccessUITests(unittest.TestCase):
         process.poll.return_value = None
         with patch("batch.gui.preflight"), patch("batch.gui.check_destination"), patch("batch.gui.launch", return_value=process) as launch:
             button.invoke()
+            wait_for_start(self.app)
             launch.assert_called_once_with(self.root, kind="local", job_ids=[ident],
                                            order_ids=[ident], scope_mode="selected")
             self.assertTrue(button.instate(["disabled", "pressed"]))
@@ -155,6 +157,7 @@ class SessionAccessUITests(unittest.TestCase):
             self.assertEqual(button.cget("text"), "Uruchamianie...")
             button.invoke()
             self.app.start(kind="local")
+            wait_for_start(self.app)
             launch.assert_called_once()
 
     def test_running_and_finish_then_stop_remain_latched_until_worker_is_idle(self):
@@ -179,6 +182,7 @@ class SessionAccessUITests(unittest.TestCase):
         self.readiness.return_value = failure
         with patch("batch.gui.collect_readiness", return_value=failure), patch("batch.gui.launch") as launch:
             self.app.local_tab.controls["start"].invoke()
+            wait_for_start(self.app)
             launch.assert_not_called()
         self.assertIn("Missing model", self.app.local_tab.note.get())
         self.assertTrue(self.app.local_tab.controls["start"].instate(["!pressed", "!disabled"]))

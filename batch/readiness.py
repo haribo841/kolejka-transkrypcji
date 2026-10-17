@@ -4,9 +4,10 @@ from __future__ import annotations
 import importlib.metadata
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import subprocess
-import tempfile
+import uuid
 
 from .common import APP, NO_WINDOW, application_python, check_disk, read_json, signature
 from .diarization import validate_diarization
@@ -87,7 +88,7 @@ def configuration_fingerprint(config, versions=None):
                           if p.is_file() and ".cache" not in p.parts and p.suffix in {".xml", ".bin", ".onnx", ".yaml", ".json", ".npz"})
     backend = {name: signature((APP / "batch" / name).read_text(encoding="utf-8"))
                for name in ("asr.py", "worker.py", "media.py", "uvr.py", "uvr_child.py", "uvr_recovery.py",
-                            "uvr_timeline.py", "diarization.py", "diarize_child.py", "setup_model.py")}
+                            "uvr_timeline.py", "diarization.py", "diarize_child.py", "setup_model.py", "output_fallback.py")}
     return signature({"format": 1, "settings": {key: config.get(key) for key in KEYS},
                       "files": stamps, "versions": versions if versions is not None else environment_versions(config),
                       "backend": backend})
@@ -225,11 +226,27 @@ def check_destination(folder, reserve_gb=2):
     parent = path
     while not parent.exists() and parent != parent.parent:
         parent = parent.parent
+    if parent == parent.parent and parent != path:
+        raise ValueError("Folder wyników nie istnieje; dostępny jest tylko katalog główny dysku: " +
+                         str(path) + ". Sprawdź lokalizację nagrania i wybierz istniejący folder wyników.")
     if not parent.is_dir():
         raise ValueError("Folder wyników nie jest dostępny: " + str(path))
     check_disk(parent, reserve_gb=reserve_gb)
+    probe_path = parent / (".kolejka-zapis-" + uuid.uuid4().hex + ".tmp")
+    created = False
     try:
-        with tempfile.TemporaryFile(dir=parent) as probe:
-            probe.write(b"write-access")
+        try:
+            descriptor = os.open(probe_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+            try:
+                payload = b"write-access"
+                if os.write(descriptor, payload) != len(payload):
+                    raise OSError("Nie udało się zapisać całego pliku próbnego.")
+            finally:
+                os.close(descriptor)
+        finally:
+            if created:
+                probe_path.unlink(missing_ok=True)
     except OSError as exc:
-        raise OSError("Brak prawa zapisu do folderu wyników: " + str(path)) from exc
+        raise OSError("Nie można zapisać wyników w folderze: " + str(path) +
+                      ". Sprawdź dostęp do " + str(parent) + ": " + str(exc)) from exc

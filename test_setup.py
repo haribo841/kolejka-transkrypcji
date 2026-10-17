@@ -183,12 +183,16 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(self.app.setup_dialog.token_var.get(), "")
 
     def test_start_with_missing_model_opens_configuration_without_mutating_queue(self):
+        from test_support import wait_for_start
+        self.app.store.add_many([{"identity": "yt:abcdefghij0", "kind": "youtube", "title": "Film",
+                                 "source": "https://youtube.com/watch?v=abcdefghij0"}])
         before = self.app.store.control()
         with patch("batch.gui.messagebox.showerror") as popup, patch("batch.gui.launch") as launch:
             self.app.start()
+            wait_for_start(self.app)
             launch.assert_not_called()
             popup.assert_not_called()
-        self.assertEqual(before, self.app.store.control())
+        self.assertEqual(self.app.store.control(), before)
         self.assertEqual(self.app.notebook.select(), str(self.app.config_page))
         self.assertTrue((self.root / "ostatni-blad-start.json").is_file())
 

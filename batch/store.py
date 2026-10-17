@@ -315,6 +315,7 @@ class Store:
             db.execute(BEGIN_WRITE)
             validate_selection(db, kind, ids)
             db.execute("UPDATE jobs SET status='pending',stage='Oczekuje na wznowienie' WHERE (status IN ('blocked','partial') OR "
+                       "(status='output_required' AND error_code='output_path') OR "
                        "(status='error' AND stage='Wymaga działania')) AND " + predicate, parameters)
             db.execute("UPDATE control SET stop=0,message='',scope_kind=?,scope_ids=?,order_ids=?,scope_mode=? WHERE id=1",
                        (kind, json.dumps(ids), json.dumps(order), scope_mode))

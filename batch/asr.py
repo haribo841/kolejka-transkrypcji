@@ -146,9 +146,13 @@ class ASR:
 
     def infer_block(self, samples, block, generation, language):
         import numpy as np
-        silent = float(np.max(np.abs(samples))) < 1e-7
+        silent = not len(samples) or float(np.max(np.abs(samples))) < 1e-7
         if silent:
             return "", [], [], True
+        if len(samples) <= 200:
+            # OpenVINO's reflect padding requires more than 200 samples.
+            # Padding is only model context; timestamps retain the source length.
+            samples = np.pad(samples, (0, RATE - len(samples)))
         pipe = self.load()
         options = pipe.get_generation_config()
         if generation["language"] and generation["language"] not in options.lang_to_id:
@@ -158,8 +162,9 @@ class ASR:
         result = pipe.generate(samples, generation_config=options)
         text = "".join(result.texts)
         words = [convert_word(word, block) for word in (result.words or [])]
+        words = [word for word in words if word["end"] > word["start"]]
         segments = [convert_segment(chunk, block) for chunk in (result.chunks or [])]
-        if text.strip() and not words:
+        if text.strip() and not result.words:
             raise RuntimeError("Whisper zwrócił tekst bez wymaganych timestampów słów.")
         return text, segments, words, False
 
