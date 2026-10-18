@@ -55,32 +55,35 @@ class RelocationTests(unittest.TestCase):
         first, second = self.recording("first"), self.recording("second")
         shutil.move(self.old, self.new)
         before = self.store.jobs()
+        entries = [self.entry(first), self.entry(second)]
         (self.new / "second.mkv").write_bytes(b"wrong source")
         with self.assertRaisesRegex(ValueError, "SHA-256"):
-            relocate_local(self.store, [self.entry(first), self.entry(second)])
+            relocate_local(self.store, entries)
         self.assertEqual(self.store.jobs(), before)
         (self.new / "second.mkv").write_bytes(b"second")
         destination = self.new / second["folder"]
         reserve_output(destination, "local:another")
         with self.assertRaises(FileExistsError):
-            relocate_local(self.store, [self.entry(first), self.entry(second)])
+            relocate_local(self.store, entries)
         self.assertEqual(self.store.jobs(), before)
 
     def test_missing_checkpoints_are_not_silently_replaced(self):
         job = self.recording()
         self.store.update(job["id"], attempts=1, processed_until=15)
         shutil.move(self.old, self.new)
+        entries = [self.entry(job)]
         with self.assertRaisesRegex(ValueError, "punktów wznowienia"):
-            relocate_local(self.store, [self.entry(job)])
+            relocate_local(self.store, entries)
 
     def test_running_session_and_stale_plan_are_rejected(self):
         job = self.recording()
         shutil.move(self.old, self.new)
+        entries = [self.entry(job)]
         lock = WorkerLock(self.store.root)
         self.assertTrue(lock.acquire())
         try:
             with self.assertRaisesRegex(ValueError, "zatrzymaj"):
-                relocate_local(self.store, [self.entry(job)])
+                relocate_local(self.store, entries)
         finally:
             lock.close()
         entry = {**self.entry(job), "old_source": "stale path"}

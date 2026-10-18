@@ -29,6 +29,43 @@ def verify_result_location(store, old, root):
         raise ValueError("Folder wyników nie istnieje: " + str(destination.parent))
 
 
+def prepare_relocation(store, entry, seen, position, progress):
+    """Verify one planned move without changing the registry or source files."""
+    old = store.get(entry["id"])
+    if not old or old["kind"] != "local" or old["id"] in seen:
+        raise ValueError("Niepoprawne lub powtórzone ID nagrania w mapie relokacji.")
+    seen.add(old["id"])
+    if old["source"] != entry["old_source"] or old["output_root"] != entry["old_output_root"]:
+        raise ValueError("Lokalizacja nagrania zmieniła się po przygotowaniu mapy.")
+    progress(f"Sprawdzanie nagrania {position}: {old['title']}")
+    source = input_file(entry["new_source"])
+    stamp = source.stat()
+    if digest(source) != old["identity"].partition(":")[2]:
+        raise ValueError("Zawartość przeniesionego nagrania nie zgadza się z SHA-256: " + str(source))
+    if (stamp.st_size, stamp.st_mtime_ns) != (source.stat().st_size, source.stat().st_mtime_ns):
+        raise ValueError("Nagranie zmieniło się podczas sprawdzania: " + str(source))
+    root = str(local_path(entry["new_output_root"])) if entry["new_output_root"] is not None else None
+    verify_result_location(store, old, root)
+    metadata = json.loads(old["source_meta"])
+    if "new_intended_output_root" in entry:
+        metadata["intended_output_root"] = str(local_path(entry["new_intended_output_root"]))
+    return old, str(source), root, json.dumps(metadata, ensure_ascii=False), stamp
+
+
+def apply_relocations(store, prepared):
+    """Update all verified paths in one transaction, rejecting concurrent edits."""
+    with store.connect() as db:
+        db.execute(BEGIN_WRITE)
+        for old, source, root, metadata, stamp in prepared:
+            current = dict(db.execute("SELECT * FROM jobs WHERE id=?", (old["id"],)).fetchone())
+            if current != old:
+                raise ValueError("Nagranie zmieniło się podczas relokacji; operacja została wycofana.")
+            db.execute("UPDATE jobs SET source=?,output_root=?,source_meta=?,updated=? WHERE id=?",
+                       (source, root, metadata, now(), old["id"]))
+            db.execute("INSERT OR REPLACE INTO local_cache VALUES(?,?,?,?)",
+                       (source, stamp.st_size, stamp.st_mtime_ns, old["identity"].partition(":")[2]))
+
+
 def relocate_local(store, entries, progress=lambda message: None):
     """Validate an explicit ID/path map, then atomically change paths, never processing state.
 
@@ -45,35 +82,8 @@ def relocate_local(store, entries, progress=lambda message: None):
             raise ValueError("Relokacja wymaga zatrzymanej kolejki.")
         prepared, seen = [], set()
         for entry in entries:
-            old = store.get(entry["id"])
-            if not old or old["kind"] != "local" or old["id"] in seen:
-                raise ValueError("Niepoprawne lub powtórzone ID nagrania w mapie relokacji.")
-            seen.add(old["id"])
-            if old["source"] != entry["old_source"] or old["output_root"] != entry["old_output_root"]:
-                raise ValueError("Lokalizacja nagrania zmieniła się po przygotowaniu mapy.")
-            progress(f"Sprawdzanie nagrania {len(prepared) + 1}: {old['title']}")
-            source = input_file(entry["new_source"])
-            stamp = source.stat()
-            if digest(source) != old["identity"].partition(":")[2]:
-                raise ValueError("Zawartość przeniesionego nagrania nie zgadza się z SHA-256: " + str(source))
-            if (stamp.st_size, stamp.st_mtime_ns) != (source.stat().st_size, source.stat().st_mtime_ns):
-                raise ValueError("Nagranie zmieniło się podczas sprawdzania: " + str(source))
-            root = str(local_path(entry["new_output_root"])) if entry["new_output_root"] is not None else None
-            verify_result_location(store, old, root)
-            metadata = json.loads(old["source_meta"])
-            if "new_intended_output_root" in entry:
-                metadata["intended_output_root"] = str(local_path(entry["new_intended_output_root"]))
-            prepared.append((old, str(source), root, json.dumps(metadata, ensure_ascii=False), stamp))
-        with store.connect() as db:
-            db.execute(BEGIN_WRITE)
-            for old, source, root, metadata, stamp in prepared:
-                current = dict(db.execute("SELECT * FROM jobs WHERE id=?", (old["id"],)).fetchone())
-                if current != old:
-                    raise ValueError("Nagranie zmieniło się podczas relokacji; operacja została wycofana.")
-                db.execute("UPDATE jobs SET source=?,output_root=?,source_meta=?,updated=? WHERE id=?",
-                           (source, root, metadata, now(), old["id"]))
-                db.execute("INSERT OR REPLACE INTO local_cache VALUES(?,?,?,?)",
-                           (source, stamp.st_size, stamp.st_mtime_ns, old["identity"].partition(":")[2]))
+            prepared.append(prepare_relocation(store, entry, seen, len(prepared) + 1, progress))
+        apply_relocations(store, prepared)
         return len(prepared)
     finally:
         worker.close()

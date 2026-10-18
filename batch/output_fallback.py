@@ -47,16 +47,21 @@ def fallback_metadata(metadata, previous, destination):
     return metadata
 
 
-def preserve_work(previous, destination, identity):
-    if previous == destination or not previous.exists():
-        return
-    assert_output_owner(previous, identity)
+def work_files(previous):
     files = []
     for path in previous.rglob("*"):
         if path.is_symlink() or path.is_junction():
             raise ValueError("Katalog wyników zawiera dowiązanie; nie skopiowano plików poza katalogiem nagrania.")
         if path.is_file():
             files.append(path.relative_to(previous))
+    return files
+
+
+def preserve_work(previous, destination, identity):
+    if previous == destination or not previous.exists():
+        return
+    assert_output_owner(previous, identity)
+    files = work_files(previous)
     if destination.exists():
         assert_output_owner(destination, identity)
         if all((destination / leaf).is_file() and digest(previous / leaf) == digest(destination / leaf) for leaf in files):
