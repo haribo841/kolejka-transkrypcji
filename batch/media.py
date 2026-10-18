@@ -9,6 +9,7 @@ import time
 
 from .common import (NO_WINDOW, RATE, ResourceError, atomic_json, check_disk,
                      digest, read_json, signature)
+from .audio_recovery import run_decoder
 from .youtube_access import DEFAULTS, QuietLogger, error_message, validate_preferences, youtube_client
 from .paths import child_path, input_file, local_path, media_tool, output_file, within_root
 
@@ -225,7 +226,7 @@ def decode(source, work, config, track, progress):
     if track < 0 or track >= len(streams):
         raise MediaError(f"Wybrano ścieżkę audio {track + 1}, dostępnych: {len(streams)}.")
     clock = clock_metadata(source, config, track, data)
-    decoder = "video-clock-v2" if clock["has_video"] else "mono-rematrix-v1"
+    decoder = "video-clock-v3" if clock["has_video"] else "mono-rematrix-v2"
     key = signature({"source": source_hash, "track": track, "rate": RATE, "decoder": decoder})
     marker, pcm = child_path(work, "pcm.json"), child_path(work, "audio.f32le")
     saved = read_json(marker)
@@ -240,27 +241,29 @@ def decode(source, work, config, track, progress):
         "-vn", "-sn", "-dn", "-ac", "1", "-af", clock_filters(clock, RATE),
         "-ar", str(RATE), "-c:a", "pcm_f32le", "-f", "f32le",
         "-progress", "pipe:1", str(temporary)]
-    with error_file.open("wb") as errors:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors,
-                                   creationflags=NO_WINDOW, text=True, encoding="utf-8", shell=False)
-        code = decode_progress(process, duration, work, config, progress)
-    if code:
-        message = error_file.read_text(encoding="utf-8", errors="replace")[-2500:]
-        if "No space" in message:
-            raise ResourceError(message)
-        raise MediaError("FFmpeg: " + message)
+    def execute(cmd):
+        with error_file.open("wb") as errors:
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errors,
+                                       creationflags=NO_WINDOW, text=True, encoding="utf-8", shell=False)
+            return decode_progress(process, duration, work, config, progress)
+    recovery = run_decoder(command, execute, error_file, lambda message: progress(message, 0))
     size = temporary.stat().st_size
     if size % 4:
         raise MediaError("Brak poprawnych próbek audio.")
     if not size:
+        if recovery:
+            raise MediaError("Uszkodzone źródło nie zawiera próbek możliwych do odzyskania. Wybierz poprawny plik lub inną ścieżkę audio.")
         raise EmptyAudio(clock["video_duration"] or duration)
-    pad_verified_tail(temporary, clock, config, work)
+    if not recovery:
+        pad_verified_tail(temporary, clock, config, work)
     size = temporary.stat().st_size
     validate_pcm(temporary)
     os.replace(temporary, pcm)
     duration = size / 4 / RATE
     atomic_json(marker, {"signature": key, "bytes": size, "duration": duration,
-                         "source_sha256": source_hash, "track": track, "sha256": digest(pcm)})
+                         "source_sha256": source_hash, "track": track, "sha256": digest(pcm),
+                         "source_duration": max(duration, clock["video_duration"] or 0,
+                                                clock["audio_end"] if recovery else 0), "recovery": recovery})
     return pcm, duration, key
 
 

@@ -689,6 +689,8 @@ class QueueWindow:
                                          order_ids=request["ids"], scope_mode=request["mode"])
             self.launch_kind, self.launch_deadline = kind, time.monotonic() + 10
             atomic_json(self.root / START_ERROR_FILE, {"at": now(), "kind": kind, "message": ""})
+            note = self.local_tab.note if kind == "local" else self.source_note
+            note.set(f"Kontrola konfiguracji i folderu wyników zakończona. Zakres sesji: {len(request['ids'])} nagrań.")
         except Exception as exc:
             self.record_start_error(kind, str(exc))
             messagebox.showerror("Kolejka nie została uruchomiona", str(exc), parent=self.window)

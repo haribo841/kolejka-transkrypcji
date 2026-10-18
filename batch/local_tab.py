@@ -167,7 +167,7 @@ class LocalQueueTab:
         recovery.pack(fill="x", pady=(5, 0))
         for key, text, action, hint in (
                 ("retry", "Ponów nieudane", lambda: app.retry(kind="local", ids=self.selected()), HELP["retry"]),
-                ("resume", "Wznów brakującą część", self.start_selected, "Uruchamia zaznaczone nagranie od zachowanego punktu. Gotowy początek zostaje wykorzystany."),
+                ("resume", "Wznów brakującą część", self.start_selected, "Ponawia zaznaczone nagranie, wykorzystując zachowane bloki. Przy uszkodzonym źródle dodaj sprawną kopię albo wybierz inną ścieżkę audio."),
                 ("partial_txt", "Otwórz częściowy TXT", self.open_partial, "Otwiera zweryfikowany częściowy wynik zaznaczonego nagrania."),
                 ("error_log", "Otwórz log błędu", self.open_error_log, "Otwiera zapis błędu zaznaczonego nagrania, np. UVR lub FFmpeg."),
                 ("results", "Otwórz wyniki", lambda: app.open_results(self.selected()), HELP["results"]),
@@ -399,15 +399,26 @@ class LocalQueueTab:
         if len(ids) == 1 and ids[0] in self.app.jobs:
             job = self.app.jobs[ids[0]]
             self.detail.set(f"Źródło: {job['source']}\nWyniki: {self.result_location(job)}" +
-                            (f"\nZachowano do {duration_text(job['processed_until'])} z {duration_text(job['duration'])}. "
-                             f"Pozostało: {duration_text(max(0, (job['duration'] or 0) - job['processed_until']))}. Brakującą część podejmie następny Start."
-                             if job.get("processed_until") and job['status'] != 'done' else "") +
+                            self.partial_detail(job) +
                             ("\nOstatni problem: " + job["error"][:600] if job["error"] else "") + self.action_hint(job))
         else:
             self.detail.set(f"Zaznaczono: {len(ids)} | Zaznacz jedno nagranie, aby zobaczyć jego miejsce wyników.")
         if hasattr(self, "scope_summary") and "start_selected" in self.controls:
             waiting = WorkerLock.busy(self.app.root / "uruchamianie")
             self.update_start_controls(self.app.store.control(), WorkerLock.busy(self.app.root), waiting)
+
+    @staticmethod
+    def partial_detail(job):
+        if not job.get("processed_until") or job["status"] == "done":
+            return ""
+        if job.get("error_code") == "audio_decode_recovered":
+            return (f"\nOdzyskana oś czasu: do {duration_text(job['processed_until'])} z {duration_text(job['duration'])}. "
+                    "Uszkodzone pakiety źródła mogą powodować luki wewnątrz nagrania, nie tylko na końcu. "
+                    "Dodaj ponownie sprawną kopię nagrania albo wybierz inną ścieżkę audio. "
+                    "Ponowny Start tego samego źródła nie potwierdzi kompletności.")
+        return (f"\nZachowano do {duration_text(job['processed_until'])} z {duration_text(job['duration'])}. "
+                f"Pozostało: {duration_text(max(0, (job['duration'] or 0) - job['processed_until']))}. "
+                "Brakującą część podejmie następny Start.")
 
     def result_location(self, job):
         meta = json.loads(job["source_meta"])

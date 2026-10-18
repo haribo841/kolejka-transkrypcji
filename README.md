@@ -15,6 +15,7 @@ A Windows desktop application built with Python and Tkinter/ttk for processing Y
 - Start or resume a session, or finish the current recording and then stop. The worker continues when the window closes; reopening the application reconnects to the queue.
 - Start stays visibly pressed during launch and processing, prevents repeated launches, and returns to its idle state when the worker stops. Failed preflight checks show their reason and restore the button.
 - Resume transcription, speaker diarization, and vocal separation from verified checkpoints after an interruption.
+- If source audio contains damaged packets, retry decoding once while retaining its timeline. Recovered audio is transcribed and exported as a partial result with a damage warning; undecodable files remain errors. Review the partial transcript and import an intact copy or select another audio track. Decoder logs and checkpoints are retained.
 - Whisper large-v3-turbo through OpenVINO GenAI on CPU, word timestamps, pyannote Community-1 for speaker diarization, and optional Universal Vocal Remover (UVR) through audio-separator.
 - Optionally retain source audio and the separated vocal track. Original local files remain untouched.
 - Unique output names based on the recording ID, atomic writes, and versioned exports when an output name is already occupied.

@@ -4,8 +4,9 @@ import os
 import subprocess
 
 from .asr import checkpoint, valid_checkpoint
-from .common import NO_WINDOW, ResourceError, check_disk, digest, signature
-from .failures import JobError, resource_failure
+from .audio_recovery import run_decoder
+from .common import NO_WINDOW, check_disk, digest, signature
+from .failures import JobError
 from .media import probe, positive_duration
 from .paths import child_path, media_tool
 from .processes import ChildGuard
@@ -41,7 +42,10 @@ def clock_metadata(source, config, track, data=None):
         end = tagged_end(video)
         duration = (positive_duration(video.get("duration")) or positive_duration(end - origin if end else None) or
                     positive_duration(data.get("format", {}).get("duration")))
-    return {"origin": origin, "audio_start": time_value(audio[track].get("start_time"), origin),
+    audio_start = time_value(audio[track].get("start_time"), origin)
+    audio_duration = positive_duration(audio[track].get("duration")) or positive_duration(data.get("format", {}).get("duration"))
+    audio_end = max(0, audio_start - origin + audio_duration) if audio_duration else 0
+    return {"origin": origin, "audio_start": audio_start, "audio_end": audio_end,
             "video_duration": duration, "has_video": video is not None}
 
 
@@ -52,7 +56,7 @@ def clock_filters(metadata, rate):
 
 def decode_clock(source, config, track, directory, emit):
     metadata = clock_metadata(source, config, track)
-    key = signature({"source": digest(source), "track": track, "clock": metadata, "decoder": 2, "rate": UVR_RATE})
+    key = signature({"source": digest(source), "track": track, "clock": metadata, "decoder": 3, "rate": UVR_RATE})
     path, marker = child_path(directory, "audio.f32"), child_path(directory, "audio-clock.json")
     saved = valid_checkpoint(marker, key)
     if saved and path.is_file() and path.stat().st_size == saved["audio_frames"] * 8 and digest(path) == saved["sha256"]:
@@ -66,18 +70,26 @@ def decode_clock(source, config, track, directory, emit):
                "-copyts", "-protocol_whitelist", "file,pipe", "-i", str(source), "-map", f"0:a:{track}",
                "-vn", "-sn", "-dn", "-ac", "2", "-af", filters, "-ar", str(UVR_RATE),
                "-c:a", "pcm_f32le", "-f", "f32le", "-progress", "pipe:1", str(temporary)]
-    execute_decoder(command, directory, config, emit)
+    recovery = run_decoder(command, lambda cmd: execute_decoder(cmd, directory, config, emit),
+                           child_path(directory, "timeline-ffmpeg.log"), emit)
     size = temporary.stat().st_size
     if size % 8:
         raise JobError("Brak poprawnych próbek wybranej ścieżki audio.", "audio_decode_failed")
     if not size:
+        if recovery:
+            raise JobError("Uszkodzone źródło nie zawiera próbek możliwych do odzyskania. Wybierz poprawny plik lub inną ścieżkę audio.",
+                           "audio_decode_failed")
         from .media import EmptyAudio
         raise EmptyAudio(metadata["video_duration"])
     os.replace(temporary, path)
     audio_frames = size // 8
-    frames = max(audio_frames, round((metadata["video_duration"] or 0) * UVR_RATE))
+    # Decoder recovery cannot establish a clean EOF or prove a silent tail.
+    source_duration = max(audio_frames / UVR_RATE, metadata["video_duration"] or 0,
+                          metadata["audio_end"] if recovery else 0)
+    frames = audio_frames if recovery else round(source_duration * UVR_RATE)
     saved = {**metadata, "signature": key, "sha256": digest(path), "audio_frames": audio_frames,
-             "frames": frames, "duration": frames / UVR_RATE, "rate": UVR_RATE}
+             "frames": frames, "duration": frames / UVR_RATE, "rate": UVR_RATE,
+             "source_duration": source_duration, "recovery": recovery}
     checkpoint(marker, saved)
     return path, saved
 
@@ -96,11 +108,7 @@ def execute_decoder(command, directory, config, emit):
                 code = process.wait()
             finally:
                 process.stdout.close()
-    if code:
-        message = error_file.read_text(encoding="utf-8", errors="replace")[-2000:]
-        if resource_failure(RuntimeError(message)):
-            raise ResourceError("FFmpeg: " + message)
-        raise JobError("Nie udało się odczytać ścieżki audio: " + message, "audio_decode_failed")
+    return code
 
 
 def prepare_clock_block(pcm, clock, stage, block):

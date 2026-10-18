@@ -74,6 +74,15 @@ def cleanup(work, job):
         remove_work_file(path, work)
 
 
+def audio_completion(work, duration, uvr_report):
+    if uvr_report:
+        recovery = uvr_report.get("timeline", {}).get("recovery")
+        return max(duration, uvr_report.get("duration", duration)), bool(uvr_report.get("complete", True) and not recovery), recovery
+    decoded = read_json(work / "pcm.json") or {}
+    recovery = decoded.get("recovery")
+    return max(duration, decoded.get("source_duration", duration)), not recovery, recovery
+
+
 class Worker:
     def __init__(self, root, processor=None):
         self.root = Path(root)
@@ -128,8 +137,7 @@ class Worker:
                                           recovery_only=job.get("processed_until", 0) > 0)
             retained.append(str(source.relative_to(folder)))
         pcm, duration, pcm_key = decode(source, work, config, 0 if config.get("uvr_enabled") else job["audio_track"], self.progress)
-        full_duration = uvr_report.get("duration", duration) if uvr_report else duration
-        complete = uvr_report.get("complete", True) if uvr_report else True
+        full_duration, complete, recovery = audio_completion(work, duration, uvr_report)
         self.store.update(job["id"], duration=full_duration)
         asr = self.asr.run(pcm, duration, pcm_key, job, work, self.progress)
         if config["diarization"] and asr["words"]:
@@ -145,6 +153,7 @@ class Worker:
                   "created": now(), "duration": full_duration, "processed_until": duration, "language": job["language"],
                   "sample_rate": 16000, "audio_track": job["audio_track"],
                   "settings": config, "asr": asr, "diarization": diar, "uvr": uvr_report,
+                  "audio_recovery": recovery,
                   "retained_audio": retained,
                   "diarization_blocks": diar_parts, "words": words, "segments": cues_from_words(words),
                   "notes": ["Etykiety mówców są automatyczne i dotyczą wyłącznie tego nagrania.",
@@ -191,9 +200,10 @@ class Worker:
         duration, full_duration = report["processed_until"], report["duration"]
         self.progress("Atomowy zapis i sprawdzanie TXT, SRT, VTT, JSON", 0)
         if not complete:
-            failure = report["uvr"].get("failure", {})
+            failure = report.get("audio_recovery") or (report.get("uvr") or {}).get("failure", {})
             report["incomplete_reason"] = failure
-            report["missing_intervals"] = [{"start": duration, "end": full_duration}]
+            report["coverage_unknown"] = bool(failure.get("coverage_unknown"))
+            report["missing_intervals"] = [{"start": duration, "end": full_duration}] if duration < full_duration else []
             export(folder, report, execution, complete=False)
             self.store.record_failure(job["id"], failure.get("message", "UVR: pozostała brakująca część."),
                                       failure.get("code", "uvr_partial"), partial=True, processed_until=duration)

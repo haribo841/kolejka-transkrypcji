@@ -117,6 +117,18 @@ class StartResponsivenessTests(unittest.TestCase):
             launch.assert_called_once_with(self.root, kind="local", job_ids=expected,
                                            order_ids=expected, scope_mode="visible")
 
+    def test_successful_start_replaces_checking_note_in_both_queues(self):
+        self.app.store.add_many([{"identity": "youtube:abcdefghijk", "kind": "youtube", "title": "Online lecture",
+                                 "source": "https://www.youtube.com/watch?v=abcdefghijk", "date": "2020-01-01"}])
+        for kind, note, count in (("local", self.app.local_tab.note, 3), ("youtube", self.app.source_note, 1)):
+            with self.subTest(queue=kind), self.launch_process() as launch:
+                self.app.start(kind=kind)
+                wait_for_start(self.app)
+                launch.assert_called_once()
+                self.assertEqual(note.get(), f"Kontrola konfiguracji i folderu wyników zakończona. Zakres sesji: {count} nagrań.")
+                self.app.update_session_controls()
+                self.assertNotIn("Sprawdzanie", note.get())
+
     def test_selected_snapshot_is_unchanged_when_selection_changes_during_check(self):
         tab = self.app.local_tab
         tab.tree.selection_set(str(self.ids[1]))

@@ -43,6 +43,21 @@ def validate_segments(segments, duration):
             raise ValueError("Wynik zawiera przedział poza nagraniem.")
 
 
+def partial_notice(report, duration):
+    reason = report.get("incomplete_reason", {})
+    recovery = report.get("audio_recovery") or {}
+    if reason.get("code") == "audio_decode_recovered" or recovery.get("code") == "audio_decode_recovered":
+        return (f"[WYNIK CZĘŚCIOWY: zakres osi czasu do {timestamp(duration)} z {timestamp(report['duration'])}]\n"
+                "Źródło zawiera uszkodzone pakiety. Odzyskane audio może mieć luki wewnątrz nagrania; "
+                "brakujący dźwięk nie musi znajdować się tylko na końcu.\n"
+                "Dodaj ponownie sprawną kopię nagrania albo wybierz inną ścieżkę audio. "
+                "Ponowny Start tego samego uszkodzonego źródła nie potwierdzi kompletności.\n\n"
+                "Przyczyna: " + reason.get("message", recovery.get("message", "Uszkodzone źródło audio.")) + "\n\n")
+    return (f"[WYNIK CZĘŚCIOWY: do {timestamp(duration)} z {timestamp(report['duration'])}]\n"
+            "Przy następnym Start program podejmie brakującą część.\n\n"
+            "Przyczyna: " + reason.get("message", "Niepełne audio.") + "\n\n")
+
+
 def export(folder, report, execution_signature, *, complete=True):
     folder = Path(folder)
     assert_output_owner(folder, report["identity"])
@@ -51,11 +66,11 @@ def export(folder, report, execution_signature, *, complete=True):
     validate_segments(segments, duration)
     report["complete"] = complete
     lines = [f"{report['title']}\n"]
-    if not complete:
-        lines.extend((f"[WYNIK CZĘŚCIOWY: do {timestamp(duration)} z {timestamp(report['duration'])}]\n",
-                      "Przy następnym Start program podejmie brakującą część.\n\n",
-                      "Przyczyna: " + report.get("incomplete_reason", {}).get("message", "Niepełne audio.") + "\n\n"))
     srt, vtt = [], ["WEBVTT\n\n"]
+    if not complete:
+        notice = partial_notice(report, duration)
+        lines.append(notice)
+        vtt.append("NOTE " + " ".join(notice.replace("-->", "→").splitlines()) + "\n\n")
     cue_number = 0
     for segment in segments:
         start, end = segment["start"], segment["end"]
