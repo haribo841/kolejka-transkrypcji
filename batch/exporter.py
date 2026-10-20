@@ -58,6 +58,17 @@ def partial_notice(report, duration):
             "Przyczyna: " + reason.get("message", "Niepełne audio.") + "\n\n")
 
 
+def recovered_notice(report):
+    recovery = report.get("audio_recovery") or {}
+    if not recovery:
+        return ""
+    return ("[GOTOWE Z OSTRZEŻENIEM: odzyskano dostępną część uszkodzonego źródła]\n"
+            "Przetwarzanie zakończono. Odzyskane audio może mieć luki wewnątrz nagrania; "
+            "nie można potwierdzić kompletności źródła. Timestampy odnoszą się do osi czasu nagrania.\n"
+            "Kolejny Start nie ponawia tego samego uszkodzonego źródła. Zachowano audio i punkty kontrolne.\n\n"
+            "Przyczyna: " + recovery.get("message", "Uszkodzone źródło audio.") + "\n\n")
+
+
 def export(folder, report, execution_signature, *, complete=True):
     folder = Path(folder)
     assert_output_owner(folder, report["identity"])
@@ -67,8 +78,8 @@ def export(folder, report, execution_signature, *, complete=True):
     report["complete"] = complete
     lines = [f"{report['title']}\n"]
     srt, vtt = [], ["WEBVTT\n\n"]
-    if not complete:
-        notice = partial_notice(report, duration)
+    notice = recovered_notice(report) if complete else partial_notice(report, duration)
+    if notice:
         lines.append(notice)
         vtt.append("NOTE " + " ".join(notice.replace("-->", "→").splitlines()) + "\n\n")
     cue_number = 0
@@ -97,6 +108,9 @@ def export(folder, report, execution_signature, *, complete=True):
                 "files": {path.name: digest(path) for path in paths.values()},
                 "audio_files": {name: digest(folder / name) for name in report.get("retained_audio", [])}}
     manifest.update(complete=complete, processed_until=report.get("processed_until", duration))
+    for field in ("source_complete", "coverage_unknown", "retry_recommended", "preserve_work", "terminal_reason"):
+        if field in report:
+            manifest[field] = report[field]
     atomic_json(folder / ("gotowe.json" if complete else "czesciowe.json"), manifest)
     if not verify_outputs(folder, report["identity"], execution_signature, partial=not complete):
         raise OSError("Sprawdzenie zapisanych wyników nie powiodło się.")

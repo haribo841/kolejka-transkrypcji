@@ -12,6 +12,7 @@ from .ui_help import Tooltip, help_button, wrap_with_parent
 class ConfigurationTab:
     def __init__(self, app, parent):
         self.app = app
+        self.wizard = None
         self.variables, self.labels, self.messages = {}, {}, {}
         self.paths = {}
         frame = ttk.Frame(parent, padding=16)
@@ -20,6 +21,8 @@ class ConfigurationTab:
         ttk.Label(frame, text="Obecność plików pozwala wykonać próbę. Zielony status potwierdza przetworzenie fragmentu z bieżącymi ustawieniami.").pack(anchor="w", pady=(3, 10))
         tools = ttk.Frame(frame)
         tools.pack(fill="x", pady=(0, 12))
+        help_button(tools, "Kreator krok po kroku", self.open_wizard,
+                    "Prowadzi przez modele, opcjonalny YouTube i końcową próbę. Dalej staje się dostępne po zakończeniu czynności.").pack(side="left", padx=(0, 8))
         help_button(tools, "Sprawdź konfigurację", lambda: app.request_readiness(force=True),
                     "Sprawdza pliki i środowiska w tle, bez uruchamiania modeli i kolejki.").pack(side="left", padx=(0, 8))
         help_button(tools, "Sprawdź na fragmencie", app.test_local,
@@ -60,6 +63,13 @@ class ConfigurationTab:
         summary.pack(side="bottom", fill="x", pady=(8, 0))
         wrap_with_parent(summary, 24)
         content.pack(fill="both", expand=True)
+
+    def open_wizard(self):
+        if self.wizard and not self.wizard.closed:
+            self.wizard.dialog.lift()
+            return
+        from .config_wizard import ConfigurationWizard
+        self.wizard = ConfigurationWizard(self.app)
 
     def scroll(self, event, canvas):
         if self.app.notebook.select() == str(self.app.config_page):

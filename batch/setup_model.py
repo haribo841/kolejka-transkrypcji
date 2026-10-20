@@ -131,7 +131,13 @@ def main():
     request = {}
     try:
         request = json.loads(sys.stdin.readline())
-        if request.get("test_only"):
+        if request.get("download_whisper"):
+            from transcribe import download
+            from types import SimpleNamespace
+            write_state(root, "running", "Pobieranie przypiętego modelu Whisper. Poczekaj na zakończenie.", "download_whisper")
+            download(SimpleNamespace(model=Path(settings(root)["model"])))
+            write_state(root, "ready", "Whisper pobrany i sprawdzony. Wróć do kreatora i kliknij Dalej.", "whisper_complete")
+        elif request.get("test_only"):
             write_state(root, "running", "Trwa próba fragmentu z aktualnymi opcjami Whisper, UVR i mówców. Pierwsze uruchomienie modeli może potrwać kilka minut.", "test")
             report = smoke_test(root, request.get("source"), track=request.get("track", 0),
                                 language=request.get("language"), seconds=request.get("seconds", 60))
@@ -143,7 +149,9 @@ def main():
             configure(root, token)
         return 0
     except Exception as exc:
-        if request.get("test_only"):
+        if request.get("download_whisper"):
+            result = {"message": "Pobieranie Whisper nie powiodło się: " + str(exc), "code": "whisper_download_failed"}
+        elif request.get("test_only"):
             result = {"message": str(exc), "code": "test_failed"}
             atomic_json(root / "pierwsza-proba.json", {"passed": False, "at": now(), "error": redact(str(exc)), "source": request.get("source", "")})
         else:

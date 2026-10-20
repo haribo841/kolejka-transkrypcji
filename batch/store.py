@@ -15,6 +15,7 @@ STATUSES = {
     "error": "Błąd", "unavailable": "Niedostępny", "login_required": "Wymaga logowania",
     "scheduled": "Zaplanowany", "live": "Trwa transmisja", "draft": "Szkic bez linku",
     "blocked": "Blokada YouTube",
+    "skipped": "Pominięte",
     "no_audio": "Bez ścieżki audio", "output_required": "Wybierz miejsce wyników",
 }
 RETRYABLE = ("error", "partial", "unavailable", "login_required", "scheduled", "live", "blocked")
@@ -138,7 +139,8 @@ def validate_output_change(job, folder):
 
 
 class Store:
-    def __init__(self, root):
+    def __init__(self, root, *, timeout=30):
+        self.timeout = timeout
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "kolejka.sqlite3"
@@ -195,14 +197,28 @@ class Store:
             db.execute("UPDATE jobs SET stage='Oczekuje na wznowienie' WHERE status='pending' AND stage='Wymaga działania'")
 
     @contextmanager
-    def connect(self):
-        connection = sqlite3.connect(self.path, timeout=30)
+    def connect(self, *, timeout=None):
+        connection = sqlite3.connect(self.path, timeout=self.timeout if timeout is None else timeout)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA synchronous=FULL")
         try:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA synchronous=FULL")
             with connection:
                 yield connection
+        finally:
+            connection.close()
+
+    def snapshot(self, *, timeout=0.05):
+        """Read the table and session from one bounded, read-only transaction."""
+        connection = sqlite3.connect(self.path, timeout=timeout)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+            rows = [dict(row) for row in connection.execute(
+                "SELECT * FROM jobs ORDER BY CASE WHEN date='' THEN 1 ELSE 0 END,date,id")]
+            control = dict(connection.execute(SELECT_CONTROL).fetchone())
+            return rows, control
         finally:
             connection.close()
 
@@ -230,7 +246,7 @@ class Store:
                     (row["identity"], row["kind"], row["title"], row["source"],
                      row.get("date", ""), row.get("visibility", ""), row.get("duration"),
                      json.dumps(row.get("meta", {}), ensure_ascii=False), folder, row.get("output_root"),
-                     row.get("status", "pending"), int(row.get("status") != "draft"),
+                     row.get("status", "pending"), int(row.get("status") not in {"draft", "skipped"}),
                      row.get("stage", ""), row.get("error", ""), row.get("error_code", ""), stamp, stamp))
                 count += cursor.rowcount
         return count
@@ -349,11 +365,30 @@ class Store:
         with self.connect() as db:
             if "audio_track" in values:
                 db.execute("UPDATE jobs SET processed_until=0,progress=0,status='pending',stage='Oczekuje na wznowienie' "
-                           "WHERE audio_track<>? AND status NOT IN ('running','done','draft','output_required','no_audio') AND id IN (" +
+                           "WHERE audio_track<>? AND status NOT IN ('running','done','draft','skipped','output_required','no_audio') AND id IN (" +
                            ",".join("?" for _ in ids) + ")", (values["audio_track"], *ids))
             db.execute("UPDATE jobs SET " + ",".join(f"{key}=?" for key in values) +
-                       " WHERE status NOT IN ('running','done','draft') AND id IN (" +
+                       " WHERE status NOT IN ('running','done','draft','skipped') AND id IN (" +
                        ",".join("?" for _ in ids) + ")", (*values.values(), *ids))
+
+    def skip(self, job_id, message, code):
+        """Archive an unprocessable source without inventing a transcription."""
+        with self.connect() as db:
+            db.execute(BEGIN_WRITE)
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job is None:
+                return
+            metadata = json.loads(job["source_meta"])
+            if job["status"] == "done" and not (code == "technical_media" and metadata.get("technical_exclusion")):
+                return
+            metadata["skip_reason"] = {"message": message, "code": code, "at": now(), "previous_status": job["status"]}
+            history = json.loads(job["error_history"])
+            history.append({"at": now(), "message": message, "code": code,
+                            "processed_until": job["processed_until"]})
+            db.execute("UPDATE jobs SET status='skipped',enabled=0,stage='Zakończono: pominięte',"
+                       "error=?,error_code=?,source_meta=?,error_history=?,updated=? WHERE id=?",
+                       (message, code, json.dumps(metadata, ensure_ascii=False),
+                        json.dumps(history, ensure_ascii=False), now(), job_id))
 
     def export_csv(self, path, kind=None):
         path = output_file(path, suffix=".csv")

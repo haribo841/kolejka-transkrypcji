@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import logging
 import os
 from pathlib import Path
 import queue
+import sqlite3
 import subprocess
 import threading
 import time
@@ -39,14 +41,16 @@ FONT_FAMILY = 'Segoe UI'
 class QueueWindow:
     def __init__(self, root, tk_root=None, start_page=None):
         self.root = Path(root)
-        self.store, self.config = Store(root), settings(root)
+        self.store, self.config = Store(root, timeout=.05), settings(root)
         self.tk_root = tk_root or tk.Tk()
         self.window.title("Kolejka transkrypcji")
         self.window.geometry("1360x860")
         self.window.minsize(1220, 760)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.window.report_callback_exception = self.callback_failure
         self.events = queue.Queue()
         self.visible, self.jobs, self.controls = {}, {}, {}
+        self.control_cache = {"state": "idle", "stop": 1, "current_id": None, "scope_kind": "all", "scope_ids": "[]", "scope_mode": "legacy", "message": ""}
         self.session_view = read_json(self.root / "okno-ui.json", {})
         self.selection_queue = self.session_view.get("queue", "youtube")
         self.busy_import = self.readiness_busy = self.metadata_busy = self.closing = False
@@ -88,12 +92,19 @@ class QueueWindow:
         self.notebook.bind("<<NotebookTabChanged>>", self.queue_changed)
         self.window.bind("<Map>", lambda event: self.schedule_navigation() if event.widget is self.window else None, add="+")
         self.refresh()
-        control = self.store.control()
+        control = self.session_control()
         active = control.get("scope_kind") if control["state"] == "running" and WorkerLock.busy(self.root) else None
         preferred = start_page or active or self.selection_queue
         self.notebook.select(self.local_page if preferred == "local" else self.queue_page)
         self.schedule_navigation()
         self.events_after = self.window.after(250, self.consume_events)
+
+    def callback_failure(self, error_type, error, trace):
+        logging.error("Błąd okna", exc_info=(error_type, error, trace))
+        message = ("Baza jest chwilowo zajęta. Poczekaj i ponów czynność; postęp został zachowany."
+                   if isinstance(error, sqlite3.OperationalError) else "Czynność nie powiodła się: " + str(error)[:500])
+        self.local_tab.note.set(message)
+        self.source_note.set(message)
 
     def build_youtube(self):
         outer = ttk.Frame(self.queue_page, padding=12)
@@ -215,6 +226,9 @@ class QueueWindow:
             self.transcript_tab.on_finished = self.close
             return
         self.closing = True
+        wizard = getattr(self.config_tab, "wizard", None)
+        if wizard and not wizard.closed:
+            wizard.close()
         self.transcript_tab.close()
         self.local_tab.close()
         self.table_view.close()
@@ -290,7 +304,7 @@ class QueueWindow:
             tree.yview_moveto(children.index(item) / len(children))
 
     def next_visible_job(self, kind, clear_filters):
-        control = self.store.control()
+        control = self.session_control()
         current = self.jobs.get(control.get("current_id"))
         if current and current["kind"] == kind and current["status"] == "running":
             return current
@@ -369,11 +383,15 @@ class QueueWindow:
         return "break"
 
     def schedule_filter(self, *_):
+        if self.closing:
+            return
         if self.pending_filter:
             self.window.after_cancel(self.pending_filter)
         self.pending_filter = self.window.after(250, self.filter_now)
 
     def filter_now(self):
+        if self.pending_filter:
+            self.window.after_cancel(self.pending_filter)
         self.pending_filter = None
         self.render_list()
 
@@ -419,14 +437,35 @@ class QueueWindow:
         if hasattr(self, "local_tab"):
             self.update_session_controls()
 
+    def session_control(self):
+        try:
+            _, self.control_cache = self.store.snapshot()
+        except sqlite3.OperationalError:
+            pass
+        return self.control_cache
+
     def refresh(self):
-        rows = self.store.jobs()
+        if self.closing:
+            return
+        if self.refresh_after:
+            self.window.after_cancel(self.refresh_after)
+            self.refresh_after = None
+        try:
+            rows, control = self.store.snapshot()
+            self.control_cache = control
+            self.render_snapshot(rows, control)
+        except sqlite3.OperationalError:
+            self.current.set("Baza jest zajęta. Zachowuję widok i ponowię odświeżenie automatycznie.")
+        finally:
+            if not self.closing:
+                self.refresh_after = self.window.after(1200, self.refresh)
+
+    def render_snapshot(self, rows, control):
         self.jobs = {job["id"]: job for job in rows}
         youtube_rows = [job for job in rows if job["kind"] == "youtube"]
         counts = Counter(job["status"] for job in youtube_rows)
         enabled = sum(j["status"] == "pending" and j["enabled"] for j in youtube_rows)
         self.counts.set(f"YouTube: {len(youtube_rows)} | Gotowe: {counts['done']} | Oczekujące: {counts['pending']} (włączone: {enabled}) | Problemy: {sum(counts[s] for s in RETRYABLE)} | Szkice: {counts['draft']}")
-        control = self.store.control()
         job = self.jobs.get(control["current_id"])
         alive = WorkerLock.busy(self.root)
         scope = job["kind"] if job else control.get("scope_kind", "all")
@@ -438,7 +477,6 @@ class QueueWindow:
         self.controls["stop"].state(["!disabled"] if alive and control["state"] == "running" and scope != "local" else ["disabled"])
         self.enrich_metadata()
         self.schedule_navigation()
-        self.refresh_after = self.window.after(1200, self.refresh)
 
     def idle_title(self, alive):
         checking = self.youtube_dialog and self.youtube_dialog.checking and not self.youtube_dialog.closed
@@ -449,7 +487,7 @@ class QueueWindow:
         return "Kolejka zatrzymana. "
 
     def update_session_controls(self, control=None, alive=None):
-        control = control or self.store.control()
+        control = control or self.session_control()
         alive = WorkerLock.busy(self.root) if alive is None else alive
         scope = control.get("scope_kind", "all")
         active = alive and control["state"] == "running"
@@ -739,7 +777,7 @@ class QueueWindow:
         return False
 
     def stop(self, kind="youtube"):
-        control = self.store.control()
+        control = self.session_control()
         job = self.store.get(control["current_id"]) if control["current_id"] else None
         scope = job["kind"] if job else control.get("scope_kind", "all")
         if WorkerLock.busy(self.root) and scope not in {kind, "all"}:

@@ -40,7 +40,7 @@ def run_decoder(command, execute, error_file, emit):
     strict_log = error_file.with_name(error_file.stem + "-strict" + error_file.suffix)
     if error_file.is_file():
         shutil.copyfile(error_file, strict_log)
-    emit("Uszkodzone pakiety audio. Jedna próba odzyskania dostępnego dźwięku; wynik będzie częściowy.")
+    emit("Uszkodzone pakiety audio. Jedna próba odzyskania dostępnego dźwięku; zakończę z ostrzeżeniem o źródle.")
     recovery_command = [argument for argument in command if argument != "-xerror"]
     code = execute(recovery_command)
     recovery_error = decoder_diagnostic(error_file, code) if code else ""
@@ -51,5 +51,5 @@ def run_decoder(command, execute, error_file, emit):
     if error_file.is_file():
         recovery_error = decoder_diagnostic(error_file, code)
     return {"code": "audio_decode_recovered", "coverage_unknown": True,
-            "message": "Odzyskano dźwięk z uszkodzonego źródła. Nie można potwierdzić kompletności; sprawdź wynik częściowy.",
+            "message": "Odzyskano dostępny dźwięk z uszkodzonego źródła. Przetwarzanie zakończono; kompletność źródła jest nieznana.",
             "strict_error": strict_error, "recovery_error": recovery_error, "strict_log": strict_log.name}

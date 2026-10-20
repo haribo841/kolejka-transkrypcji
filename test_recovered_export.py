@@ -1,4 +1,4 @@
-"""Recovered corrupt audio remains visibly incomplete in exports and the queue."""
+"""Finished recovery warns about incomplete source audio without retrying forever."""
 from __future__ import annotations
 
 import json
@@ -21,21 +21,25 @@ class RecoveredExportTests(unittest.TestCase):
     def test_recovered_exports_warn_of_unknown_internal_gaps_without_fake_subtitles(self):
         with tempfile.TemporaryDirectory() as directory:
             report = self.report()
-            paths = export(Path(directory), report, "execution", complete=False)
+            report.update(source_complete=False, coverage_unknown=True, retry_recommended=False,
+                          terminal_reason=report["audio_recovery"], preserve_work=True)
+            paths = export(Path(directory), report, "execution")
             txt = paths["txt"].read_text(encoding="utf-8")
             self.assertIn("luki wewnątrz nagrania", txt)
-            self.assertIn("sprawną kopię", txt)
+            self.assertIn("GOTOWE Z OSTRZEŻENIEM", txt)
+            self.assertIn("Kolejny Start nie ponawia", txt)
             self.assertNotIn("Przy następnym Start program podejmie brakującą część", txt)
             vtt = paths["vtt"].read_text(encoding="utf-8")
             self.assertTrue(vtt.startswith("WEBVTT\n\nNOTE "))
             self.assertIn("luki wewnątrz nagrania", vtt)
             self.assertEqual(vtt.count(" --> "), 1)
             self.assertEqual(paths["srt"].read_text(encoding="utf-8").count(" --> "), 1)
-            self.assertTrue(paths["srt"].stem.endswith("_czesciowa"))
+            self.assertFalse(paths["srt"].stem.endswith("_czesciowa"))
             saved = json.loads(paths["json"].read_text(encoding="utf-8"))
-            self.assertFalse(saved["complete"])
+            self.assertTrue(saved["complete"])
+            self.assertFalse(saved["source_complete"])
             self.assertEqual(saved["audio_recovery"], report["audio_recovery"])
-            self.assertTrue(verify_outputs(directory, report["identity"], "execution", partial=True))
+            self.assertTrue(verify_outputs(directory, report["identity"], "execution"))
 
     def test_uvr_partial_keeps_the_contiguous_prefix_resume_description(self):
         with tempfile.TemporaryDirectory() as directory:

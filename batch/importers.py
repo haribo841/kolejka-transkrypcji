@@ -158,14 +158,18 @@ def local_entry(store, path, config, output_mode, output_root):
             metadata["probe_error_code"] = diagnose(exc)
     base = str(output_root_for(path, store.root, output_mode, output_root)) if output_mode else None
     status = "error" if error else "pending"
+    from .outcomes import permanent_audio_failure
+    if error and permanent_audio_failure(error, metadata["probe_error_code"]):
+        status = "skipped"
+        metadata["skip_reason"] = {"code": metadata["probe_error_code"], "message": error}
     if metadata.get("probe_error_code") == "no_audio":
-        status = "no_audio"
+        status = "skipped"
     entry = {"identity": "local:" + checksum, "kind": "local", "source": str(path), "title": path.stem,
             "date": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
             "duration": duration, "meta": metadata, "output_root": base,
             "status": status,
             "error_code": metadata.get("probe_error_code", ""), "error": error,
-            "stage": "Walidacja pliku" if error else ""}
+            "stage": "Zakończono: pominięte" if status == "skipped" else ("Walidacja pliku" if error else "")}
     return validate_local_output(store, entry)
 
 
@@ -187,7 +191,16 @@ def validate_local_output(store, entry):
     return entry
 
 
-def collect_local_files(store, paths, allow_unknown, progress):
+def collect_media_file(path, files, warnings, include_technical):
+    from .media_discovery import technical_source
+    reason = None if include_technical else technical_source(path)
+    if reason:
+        warnings.append(issue(path, "scan", reason, code="technical_media", kind="file"))
+    else:
+        files.add(path)
+
+
+def collect_local_files(store, paths, allow_unknown, progress, include_technical=False):
     from .local_outputs import linked_path, scan_media
     files, warnings = set(), list(getattr(paths, "warnings", []))
     warnings.extend(getattr(paths, "exclusions", []))
@@ -198,19 +211,19 @@ def collect_local_files(store, paths, allow_unknown, progress):
                 continue
             path = Path(source).resolve(strict=True)
             if path.is_dir():
-                scanned = scan_media(path, MEDIA, excluded=excluded, progress=progress)
+                scanned = scan_media(path, MEDIA, excluded=excluded, progress=progress, include_technical=include_technical)
                 files.update(scanned)
                 warnings.extend(scanned.warnings)
                 warnings.extend(scanned.exclusions)
             elif path.suffix.lower() in MEDIA or allow_unknown:
-                files.add(path)
+                collect_media_file(path, files, warnings, include_technical)
         except (OSError, ValueError) as error:
             warnings.append(issue(source, "scan", error))
     return files, warnings
 
 
-def import_local(store, paths, progress=lambda message: None, *, config=None, output_mode=None, output_root=""):
-    files, warnings = collect_local_files(store, paths, config is not None, progress)
+def import_local(store, paths, progress=lambda message: None, *, config=None, output_mode=None, output_root="", include_technical=False):
+    files, warnings = collect_local_files(store, paths, config is not None, progress, include_technical)
     count, errors, skipped, found = 0, 0, 0, {}
     issues, jobs = list(warnings), {}
     for index, path in enumerate(sorted(files), 1):
@@ -225,12 +238,12 @@ def import_local(store, paths, progress=lambda message: None, *, config=None, ou
             skipped += 1
             errors += 1
             continue
-        errors += bool(entry["error"])
+        errors += bool(entry["error"]) and entry["status"] != "skipped"
         with store.connect() as db:
             for job in db.execute("SELECT * FROM jobs WHERE identity=?", (entry["identity"],)):
                 found[job["id"]] = job["status"]
                 jobs[job["id"]] = dict(job)
-                if entry["meta"].get("probe_error"):
+                if entry["meta"].get("probe_error") and entry["status"] != "skipped":
                     issues.append(issue(path, "probe", entry["meta"]["probe_error"], code=entry["meta"]["probe_error_code"],
                                         identity=entry["identity"], job_id=job["id"]))
                 if entry["meta"].get("output_error"):
@@ -258,3 +271,7 @@ def enrich_local(store, jobs, config):
                 status = "no_audio" if metadata["probe_error_code"] == "no_audio" else "error"
                 db.execute("UPDATE jobs SET status=?,stage='Walidacja pliku',error=?,error_code=? "
                            "WHERE id=? AND status='pending'", (status, error, metadata["probe_error_code"], job["id"]))
+        if error:
+            from .outcomes import permanent_audio_failure
+            if permanent_audio_failure(error, metadata["probe_error_code"]):
+                store.skip(job["id"], error, metadata["probe_error_code"])

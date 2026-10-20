@@ -1,4 +1,4 @@
-"""Real damaged sources must produce explicit partial results, never invented silence."""
+"""Recovered sources finish with an honest warning, never invented silence."""
 from pathlib import Path
 import shutil
 import tempfile
@@ -41,7 +41,8 @@ class DamagedMediaTests(unittest.TestCase):
         self.source = self.root / "damaged.wav"
         self.write_wave(self.source)
         # Keep an aligned 200 ms payload but retain a header declaring one second.
-        self.source.write_bytes(self.source.read_bytes()[:44 + 6400])
+        with self.source.open("r+b") as stream:
+            stream.truncate(44 + 6400)
         self.source_hash = digest(self.source)
 
     @staticmethod
@@ -104,16 +105,16 @@ class DamagedMediaTests(unittest.TestCase):
 
     def test_empty_recovered_mono_is_an_error_not_a_valid_empty_transcription(self):
         work, source = self.directory("empty-mono"), self.empty_wave()
-        with patch("batch.media.run_decoder", side_effect=self.empty_recovery):
-            with self.assertRaisesRegex(MediaError, "Uszkodzone źródło"):
-                decode(source, work, self.config, 0, lambda *args: None)
+        with patch("batch.media.run_decoder", side_effect=self.empty_recovery), \
+                self.assertRaisesRegex(MediaError, "Uszkodzone źródło"):
+            decode(source, work, self.config, 0, lambda *args: None)
         self.assertFalse((work / "pcm.json").exists())
 
     def test_empty_recovered_uvr_clock_is_an_error_not_a_valid_empty_transcription(self):
         work, source = self.directory("empty-clock"), self.empty_wave()
-        with patch("batch.uvr_timeline.run_decoder", side_effect=self.empty_recovery):
-            with self.assertRaisesRegex(JobError, "Uszkodzone źródło"):
-                decode_clock(source, self.config, 0, work, lambda *args: None)
+        with patch("batch.uvr_timeline.run_decoder", side_effect=self.empty_recovery), \
+                self.assertRaisesRegex(JobError, "Uszkodzone źródło"):
+            decode_clock(source, self.config, 0, work, lambda *args: None)
         self.assertFalse((work / "audio-clock.json").exists())
 
     def nonfinite_source(self):
@@ -136,7 +137,7 @@ class DamagedMediaTests(unittest.TestCase):
             prepare_clock_block(pcm, clock, stage, {"start": 0, "end": clock["duration"]})
         self.assertFalse((stage / "input.wav").exists())
 
-    def test_successful_uvr_cannot_certify_recovered_source_as_complete(self):
+    def test_successful_uvr_finishes_processing_without_certifying_source_completeness(self):
         work = self.root / "result" / "robocze"
         work.mkdir(parents=True)
         request = {"source": str(self.source), "work": str(work), "track": 0, "config": self.config,
@@ -153,17 +154,19 @@ class DamagedMediaTests(unittest.TestCase):
         with patch("batch.uvr_timeline.clock_metadata", return_value=KNOWN_CLOCK), \
                 patch("batch.uvr_recovery.importlib.metadata.version", return_value="fixture"):
             result = VocalRecovery(request, api).run()
-        self.assertFalse(result["complete"])
-        self.assertEqual(result["duration"], 1)
+        self.assertTrue(result["complete"])
+        self.assertTrue(result["processing_complete"])
+        self.assertFalse(result["source_complete"])
+        self.assertAlmostEqual(result["duration"], 1)
         self.assertAlmostEqual(result["processed_until"], .2, places=3)
-        self.assertTrue(result["failure"]["coverage_unknown"])
-        self.assertEqual(result["failure"]["code"], "audio_decode_recovered")
+        self.assertTrue(result["timeline"]["recovery"]["coverage_unknown"])
+        self.assertEqual(result["failure"], {})
         self.assertEqual(sf.info(result["output"]).frames, round(.2 * UVR_RATE))
         self.assertEqual(len(calls), 1)
         self.assertTrue(all(part["complete_block"] for part in result["blocks"]))
         self.assertEqual(digest(self.source), self.source_hash)
 
-    def test_worker_keeps_damaged_source_partial_even_without_speech_and_continues_queue(self):
+    def test_worker_finishes_damaged_source_with_warning_and_never_automatically_retries(self):
         for with_words in (True, False):
             with self.subTest(with_words=with_words):
                 root = self.directory("worker-words" if with_words else "worker-no-words")
@@ -181,20 +184,28 @@ class DamagedMediaTests(unittest.TestCase):
                     store.start(kind="local")
                     worker.run(check=False)
                 damaged, complete = store.jobs()
-                self.assertEqual((damaged["status"], complete["status"]), ("partial", "done"))
+                self.assertEqual((damaged["status"], complete["status"]), ("done", "done"))
+                self.assertEqual(damaged["stage"], "Gotowe: odzyskane audio")
+                self.assertEqual(damaged["progress"], 100)
                 self.assertEqual(damaged["error_code"], "audio_decode_recovered")
                 self.assertEqual(asr.call_count, 2)
                 self.assertEqual(store.control()["state"], "idle")
                 folder = job_folder(root, damaged)
-                self.assertTrue(verify_outputs(folder, damaged["identity"], partial=True))
-                self.assertFalse(verify_outputs(folder, damaged["identity"]))
+                self.assertTrue(verify_outputs(folder, damaged["identity"]))
+                self.assertFalse(verify_outputs(folder, damaged["identity"], partial=True))
                 self.assertTrue((folder / "robocze" / "audio.f32le").is_file())
-                marker = read_json(folder / "czesciowe.json")
+                marker = read_json(folder / "gotowe.json")
                 report = read_json(folder / marker["outputs"]["json"])
-                self.assertFalse(report["complete"])
+                self.assertTrue(report["complete"])
+                self.assertFalse(report["source_complete"])
+                self.assertFalse(report["retry_recommended"])
                 self.assertTrue(report["coverage_unknown"])
                 self.assertEqual(report["audio_recovery"]["code"], "audio_decode_recovered")
                 self.assertEqual(report["words"] != [], with_words)
+                with patch.object(worker.asr, "run", side_effect=AssertionError("A finished damaged source was retried")):
+                    store.start(kind="local")
+                    worker.run(check=False)
+                self.assertTrue((folder / "robocze" / "audio.f32le").is_file())
                 self.assertEqual(before, {source: digest(source) for source in before})
 
 

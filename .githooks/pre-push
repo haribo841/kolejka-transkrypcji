@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+repo_root=$(git rev-parse --show-toplevel)
+if interpreter=$(git config --get kolejka.qualityPython); then
+    exec "$interpreter" -X utf8 -B "$repo_root/scripts/check_sonar_scope.py" --pre-push
+fi
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 -B "$repo_root/scripts/check_sonar_scope.py" --pre-push
+fi
+if command -v py >/dev/null 2>&1; then
+    exec py -3 -B "$repo_root/scripts/check_sonar_scope.py" --pre-push
+fi
+echo "Python is required for the Sonar scope check. Set git config kolejka.qualityPython to your Python executable." >&2
+exit 1

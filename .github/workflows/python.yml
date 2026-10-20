@@ -27,6 +27,8 @@ jobs:
             requirements-test.lock.txt
       - name: Install locked application dependencies
         run: python -m pip install -r requirements-batch.lock.txt -r requirements-test.lock.txt
+      - name: Check Sonar source and test classification in this commit
+        run: python scripts/check_sonar_scope.py --revision HEAD
       - name: Check dependency consistency
         run: python -m pip check
       - name: Install FFmpeg for real media integration tests

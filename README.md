@@ -15,7 +15,7 @@ A Windows desktop application built with Python and Tkinter/ttk for processing Y
 - Start or resume a session, or finish the current recording and then stop. The worker continues when the window closes; reopening the application reconnects to the queue.
 - Start stays visibly pressed during launch and processing, prevents repeated launches, and returns to its idle state when the worker stops. Failed preflight checks show their reason and restore the button.
 - Resume transcription, speaker diarization, and vocal separation from verified checkpoints after an interruption.
-- If source audio contains damaged packets, retry decoding once while retaining its timeline. Recovered audio is transcribed and exported as a partial result with a damage warning; undecodable files remain errors. Review the partial transcript and import an intact copy or select another audio track. Decoder logs and checkpoints are retained.
+- If source audio contains damaged packets, retry decoding once while retaining its timeline. Recovered audio finishes as Done with a damage warning once all decodable samples have been processed. JSON distinguishes completed processing from an incomplete source. Permanently unreadable inputs are archived as Skipped with a reason and are hidden from the default queue. Decoder logs, audio and checkpoints are retained; the same damaged source is not retried automatically.
 - Whisper large-v3-turbo through OpenVINO GenAI on CPU, word timestamps, pyannote Community-1 for speaker diarization, and optional Universal Vocal Remover (UVR) through audio-separator.
 - Optionally retain source audio and the separated vocal track. Original local files remain untouched.
 - Unique output names based on the recording ID, atomic writes, and versioned exports when an output name is already occupied.
@@ -52,7 +52,7 @@ The installers use the versions in `requirements-*.lock.txt`. To supply your own
 .\Instaluj-UVR.ps1 -Interpreter 'C:\Python312\python.exe'
 ```
 
-In the configuration tab, open the Community-1 setup, accept the access conditions on the [model page](https://huggingface.co/pyannote/speaker-diarization-community-1), verify your Read token, and download the model. Enable or disable vocal separation and speaker diarization, then run a sample test. You can select a long recording; the test processes up to 60 seconds. Review the transcript and speaker labels before starting a large session. Importing recordings never starts processing automatically.
+In the configuration tab, choose **Kreator krok po kroku** for a guided setup: Whisper/tools, optional UVR, optional speakers, optional YouTube, then a sample test. Next waits for each operation to finish. You may disable optional stages. In the Community-1 setup, accept the access conditions on the [model page](https://huggingface.co/pyannote/speaker-diarization-community-1), verify your Read token, and download the model. Enable or disable vocal separation and speaker diarization, then run a sample test. You can select a long recording; the test processes up to 60 seconds. Review the transcript and speaker labels before starting a large session. Importing recordings never starts processing automatically.
 
 The interface is currently in Polish. These are the main controls:
 
@@ -142,6 +142,10 @@ The transcription, diarization, and vocal separation stages process audio locall
 The test suite uses synthetic data and temporary directories. YouTube downloads and neural model calls are replaced with controlled test doubles. FFmpeg integration tests use generated audio and video; these tests are skipped if the tools are unavailable. Windows CI installs the pinned application and test dependencies plus FFmpeg 8.0.1, then runs the same offline suite. Local installations using FFmpeg 9 keep their version. Tests with real model weights and recordings are separate from the offline suite and are documented in the [validation notes](docs/WERYFIKACJA.md).
 
 SonarQube Cloud uses automatic analysis configured in [.sonarcloud.properties](.sonarcloud.properties). The Python versions are 3.12 and 3.13, matching the installed environments. Test files are explicitly listed under `sonar.tests` and excluded from the production scope. When adding a test file, update both lists in that configuration. Production files remain in scope; no rules are suppressed.
+
+Before publication, run `python scripts/check_sonar_scope.py` and the offline test suite. To enable the repository's local pre-push guard, run `git config --local core.hooksPath .githooks`. If Python is not available as `python3` or `py`, set `git config --local kolejka.qualityPython 'C:/Path/To/python.exe'`. Check an existing `core.hooksPath` setting before replacing it so any existing hooks are preserved. The guard validates the exact Git trees being pushed, including multiple refs; an unstaged fix cannot hide an invalid committed configuration. CI performs the same check. This guard checks test classification and accidental production exclusions; it is not a full Sonar analysis or a guarantee of a passing Quality Gate.
+
+[SonarQube for IDE connected mode](https://docs.sonarsource.com/sonarqube-for-vs-code/connect-your-ide/setup) can synchronize the project's rule profile and display issues while editing. Connect to SonarQube Cloud and bind to `haribo841_WebApplication1`; keep the personal token in the extension's credential store. The extension does not replace the full project analysis: [injection vulnerabilities](https://docs.sonarsource.com/sonarqube-for-vs-code/using/taint-vulnerabilities) are downloaded after server analysis. No editor connection or credentials are created by the pre-push guard.
 
 ## Repository history
 

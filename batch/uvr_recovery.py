@@ -178,15 +178,14 @@ class VocalRecovery:
             complete = self.pass_until_failure(RECOVERY_SECONDS)
         if not self.cursor:
             raise JobError(self.failure.get("message", "Brak poprawnego fragmentu wokalu."), self.failure.get("code", "uvr_failed"))
-        if self.clock.get("recovery"):
-            # Complete UVR output does not repair damaged packets in its input.
-            complete = False
-            self.failure = self.clock["recovery"]
+        # Completion concerns all decodable input. Source damage remains an
+        # explicit warning and cannot overwrite a separate UVR model failure.
         output = self.join(complete)
         result = {"signature": self.request["signature"], "sha256": digest(output), "model": self.config["uvr_model"],
                   "version": importlib.metadata.version("audio-separator"),
                   "duration": self.clock.get("source_duration", self.clock["duration"]),
-                  "processed_until": self.cursor / UVR_RATE, "complete": complete, "blocks": self.parts,
+                  "processed_until": self.cursor / UVR_RATE, "complete": complete,
+                  "processing_complete": complete, "source_complete": not bool(self.clock.get("recovery")), "blocks": self.parts,
                   "output": str(output), "failure": {} if complete else self.failure, "timeline": self.clock}
         atomic_json(self.work / "uvr-result.json", result)
         self.api.emit("UVR: wokal gotowy" if complete else "UVR: zachowano częściowy wokal; transkrybuję poprawną część", 100)

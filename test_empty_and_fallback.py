@@ -95,7 +95,7 @@ class EmptyAndFallbackTests(unittest.TestCase):
         self.assert_empty_export(silent)
         self.assertGreater(silent["duration"], 0)
         failed = next(job for job in jobs if job["source"] == str(corrupt))
-        self.assertEqual(failed["status"], "error")
+        self.assertEqual(failed["status"], "skipped")
         self.assertFalse(verify_outputs(job_folder(self.store.root, failed), failed["identity"]))
 
     def test_zero_frames_uvr_decoder_and_child_report_valid_empty_audio(self):

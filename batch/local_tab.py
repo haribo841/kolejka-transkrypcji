@@ -79,7 +79,7 @@ class LocalQueueTab:
         row.pack(fill="x", pady=(5, 0))
         for key, text, variable in (("recursive", "Podfoldery", self.recursive), ("m4a_only", "Tylko M4A", self.m4a_only),
                                     ("include_technical", "Pliki techniczne", self.include_technical)):
-            toggle = ttk.Checkbutton(row, text=text, variable=variable, command=self.save_view)
+            toggle = ttk.Checkbutton(row, text=text, variable=variable, command=self.scan_option_changed)
             toggle.pack(side="left", padx=(0, 12))
             self.help(toggle, key, self.scan_help(key))
         ttk.Label(row, text="Wyniki nowych nagrań:").pack(side="left", padx=(0, 6))
@@ -195,7 +195,7 @@ class LocalQueueTab:
         return {
             "recursive": "Przy następnym dodaniu folderu przeszuka wszystkie poziomy podfolderów. Pomija katalogi wyników, dowiązania i junctions. Sam checkbox nie dodaje plików.",
             "m4a_only": "Przy następnym dodaniu folderu wybierze tylko M4A. Wyłącz, aby importować pozostałe obsługiwane formaty audio i wideo.",
-            "include_technical": "Domyślnie pomija potwierdzone środowiska i pakiety Pythona oraz tekstowe pliki .ts. Zaznacz, aby uwzględnić je przy następnym skanowaniu. Dodaj pliki pozwala wskazać je pojedynczo."
+            "include_technical": "Domyślnie pomija środowiska i pakiety Pythona oraz tekstowe pliki .ts, także przy Dodaj pliki. Zaznacz, aby świadomie uwzględnić je przy kolejnym imporcie i pokazać istniejące techniczne pozycje. Pominięte materiały są dostępne w filtrze Pominięte."
         }[key]
 
     def button(self, parent, key, text, command, hint):
@@ -211,6 +211,10 @@ class LocalQueueTab:
                     "recursive": self.recursive.get(), "m4a_only": self.m4a_only.get(),
                     "include_technical": self.include_technical.get(),
                     "output_mode": self.output_policy()[0], "output_folder": self.output_folder.get()})
+
+    def scan_option_changed(self):
+        self.save_view()
+        self.render()
 
     def output_policy(self):
         mode = next(key for key, value in OUTPUT_MODES.items() if value == self.output_mode.get())
@@ -272,7 +276,7 @@ class LocalQueueTab:
         recursive, m4a = self.recursive.get(), self.m4a_only.get()
         include_technical = self.include_technical.get()
         self.save_view()
-        excluded = [job_folder(self.app.root, job) for job in self.app.store.jobs()]
+        excluded = [job_folder(self.app.root, job) for job in self.app.jobs.values()]
         scope = "tylko M4A" if m4a else "audio i wideo"
         scope += ", z podfolderami" if recursive else ", bez podfolderów"
         notify = lambda message: self.app.events.put(("progress", message, self.note))
@@ -296,9 +300,10 @@ class LocalQueueTab:
         self.save_view()
         self.note.set("Wyszukiwanie i identyfikacja nagrań... Lista zostanie odświeżona po imporcie.")
         config = dict(self.app.config)
+        include_technical = self.include_technical.get()
         def run():
             result = import_local(self.app.store, collect(), lambda value: self.app.events.put(("progress", value, self.note)),
-                                  config=config, output_mode=mode, output_root=custom)
+                                  config=config, output_mode=mode, output_root=custom, include_technical=include_technical)
             result["local_import"] = True
             result["note"] = import_note(result, folder_scope)
             atomic_json(self.app.root / LOCAL_IMPORT_REPORT, {"at": now(), **result})
@@ -328,15 +333,24 @@ class LocalQueueTab:
         return "break"
 
     def schedule_filter(self, *_):
+        if self.app.closing:
+            return
         if self.filter_after:
             self.parent.after_cancel(self.filter_after)
         self.filter_after = self.parent.after(200, self.filter_now)
 
     def filter_now(self):
+        if self.filter_after:
+            self.parent.after_cancel(self.filter_after)
         self.filter_after = None
         self.render()
 
     def matches_view(self, job):
+        metadata = json.loads(job["source_meta"])
+        if self.status.get() == "Wszystkie" and job["status"] == "skipped":
+            return False
+        if metadata.get("technical_exclusion") and not self.include_technical.get() and self.status.get() != STATUSES["skipped"]:
+            return False
         return (job["kind"] == "local" and self.search.get().casefold() in
                 (job["title"] + " " + job["source"]).casefold() and
                 (self.status.get() == "Wszystkie" or STATUSES[job["status"]] == self.status.get()))
@@ -357,9 +371,10 @@ class LocalQueueTab:
         sync_tree(self.tree, self.visible, visible_rows)
         self.show_detail()
         technical = sum(bool(json.loads(job["source_meta"]).get("technical_exclusion")) and not job["enabled"] for job in rows)
-        counts = Counter(job["status"] for job in rows if not json.loads(job["source_meta"]).get("technical_exclusion") or job["enabled"])
+        counts = Counter(job["status"] for job in rows if not json.loads(job["source_meta"]).get("technical_exclusion"))
         pending = sum(job["status"] == "pending" and job["enabled"] for job in rows)
-        self.counts.set(f"Lokalne: {len(rows)} | Gotowe: {counts['done']} | Częściowe: {counts['partial']} | Oczekujące: {counts['pending']} (włączone: {pending}) | Problemy: {sum(counts[s] for s in RETRYABLE if s != 'partial')} | Bez audio: {counts['no_audio']} | Miejsce wyników: {counts['output_required']} | Techniczne wyłączone: {technical}")
+        skipped = sum(job["status"] == "skipped" for job in rows)
+        self.counts.set(f"Lokalne: {len(rows) - skipped} | Gotowe: {counts['done']} | Częściowe: {counts['partial']} | Oczekujące: {counts['pending']} (włączone: {pending}) | Problemy: {sum(counts[s] for s in RETRYABLE if s != 'partial')} | Bez audio: {counts['no_audio']} | Miejsce wyników: {counts['output_required']} | Pominięte poza kolejką: {skipped} | Techniczne wyłączone: {technical}")
 
     def refresh(self, control, alive):
         self.render()
@@ -405,10 +420,12 @@ class LocalQueueTab:
             self.detail.set(f"Zaznaczono: {len(ids)} | Zaznacz jedno nagranie, aby zobaczyć jego miejsce wyników.")
         if hasattr(self, "scope_summary") and "start_selected" in self.controls:
             waiting = WorkerLock.busy(self.app.root / "uruchamianie")
-            self.update_start_controls(self.app.store.control(), WorkerLock.busy(self.app.root), waiting)
+            self.update_start_controls(self.app.session_control(), WorkerLock.busy(self.app.root), waiting)
 
     @staticmethod
     def partial_detail(job):
+        if job.get("status") == "done" and job.get("error_code") == "audio_decode_recovered":
+            return "\nGotowe z ostrzeżeniem: odzyskano dostępne audio. Źródło ma uszkodzone pakiety; dalsze ponawianie nie jest potrzebne."
         if not job.get("processed_until") or job["status"] == "done":
             return ""
         if job.get("error_code") == "audio_decode_recovered":
@@ -428,6 +445,8 @@ class LocalQueueTab:
 
     @staticmethod
     def action_hint(job):
+        if job["status"] == "skipped":
+            return "\nPozycja pominięta i wyłączona z kolejki. Przyczyna została w raporcie; sprawną kopię możesz dodać jako nowe nagranie."
         meta = json.loads(job["source_meta"])
         if meta.get("technical_exclusion") and not job["enabled"]:
             return "\nPominięto materiał techniczny: " + meta["technical_exclusion"] + ". Możesz świadomie włączyć tę pozycję."
@@ -476,7 +495,7 @@ class LocalQueueTab:
 
     def update_scope_summary(self, session, count):
         if session:
-            self.scope_summary.set(session_summary(self.app.store.control(), self.app.jobs.values()))
+            self.scope_summary.set(session_summary(self.app.session_control(), self.app.jobs.values()))
         else:
             total = sum(self.eligible(job) for job in self.ordered_jobs())
             self.scope_summary.set(f"Start/Wznów widoczne: {total} | Start zaznaczonych: {count}. Filtry ograniczają zakres; kolejność według tabeli.")

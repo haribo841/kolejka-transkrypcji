@@ -21,6 +21,18 @@ from batch.uvr_child import UVR_RATE, generated_vocal, request_paths, separator,
 from batch.worker import Worker
 
 
+class SonarConfigurationTests(unittest.TestCase):
+    def test_all_test_modules_are_classified_as_tests_and_excluded_from_production(self):
+        root = Path(__file__).resolve().parent
+        properties = dict(line.split("=", 1) for line in
+                          (root / ".sonarcloud.properties").read_text(encoding="utf-8").splitlines()
+                          if line.strip() and not line.lstrip().startswith("#"))
+        expected = {path.name for path in root.glob("test_*.py")}
+        for key in ("sonar.tests", "sonar.exclusions"):
+            with self.subTest(property=key):
+                self.assertEqual(set(properties[key].split(",")), expected)
+
+
 class WorkerLockTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

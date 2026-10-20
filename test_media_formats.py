@@ -132,9 +132,9 @@ class MediaFormatTests(unittest.TestCase):
             store = Store(tmp)
             summary = import_local(store, [silent_video, corrupt, self.inputs["mkv"]], config=self.config,
                                    output_mode="beside")
-            self.assertEqual((summary["added"], summary["errors"]), (3, 1))
-            self.assertEqual(sorted(j["status"] for j in store.jobs()), ["error", "pending", "pending"])
-            self.assertTrue(all(j["error"] for j in store.jobs() if j["status"] == "error"))
+            self.assertEqual((summary["added"], summary["errors"]), (3, 0))
+            self.assertEqual(sorted(j["status"] for j in store.jobs()), ["pending", "pending", "skipped"])
+            self.assertTrue(all(j["error"] for j in store.jobs() if j["status"] == "skipped"))
             before = store.jobs()
             import_local(store, [self.inputs["mkv"]], config=self.config, output_mode="central")
             self.assertEqual(before, store.jobs())

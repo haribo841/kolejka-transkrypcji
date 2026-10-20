@@ -22,6 +22,7 @@ PROBLEM_NAMES = {
 STATUS_NAMES = {
     "pending": "Oczekuje", "running": "Przetwarzanie", "done": "Gotowe",
     "partial": "Częściowo gotowe", "error": "Błąd",
+    "skipped": "Pominięte",
     "no_audio": "Bez ścieżki audio", "output_required": "Wybierz miejsce wyników",
 }
 TECHNICAL_CODES = {"technical_media", "technical_exclusion"}

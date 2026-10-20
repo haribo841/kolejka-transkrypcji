@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -20,6 +21,7 @@ from .exporter import export, verify_outputs
 from .result_paths import assert_output_owner, reserve_output
 from .media import EmptyAudio, MediaError, decode, download, media_metadata
 from .output_fallback import ensure_output
+from .outcomes import permanent_audio_failure
 from .speakers import assign_words, cues_from_words, merge_speakers
 from .store import Store, in_scope, now, scope_kind
 from .failures import JobError, resource_failure
@@ -58,6 +60,8 @@ def preflight(config, root, kind="all"):
 
 def cleanup(work, job):
     work = Path(work)
+    if (read_json(work.parent / "gotowe.json") or {}).get("preserve_work"):
+        return
     # Never delete source paths. Only owned intermediate files in this job folder.
     for name in ("audio.f32le", "audio.f32le.partial"):
         remove_work_file(work / name, work)
@@ -77,10 +81,12 @@ def cleanup(work, job):
 def audio_completion(work, duration, uvr_report):
     if uvr_report:
         recovery = uvr_report.get("timeline", {}).get("recovery")
-        return max(duration, uvr_report.get("duration", duration)), bool(uvr_report.get("complete", True) and not recovery), recovery
+        complete = uvr_report.get("processing_complete", uvr_report.get("complete", True))
+        return max(duration, uvr_report.get("duration", duration)), bool(complete), recovery
     decoded = read_json(work / "pcm.json") or {}
     recovery = decoded.get("recovery")
-    return max(duration, decoded.get("source_duration", duration)), not recovery, recovery
+    return max(duration, decoded.get("source_duration", duration)), True, recovery
+
 
 
 class Worker:
@@ -114,7 +120,11 @@ class Worker:
                                "track": job["audio_track"], "config": config, "format": 1})
         if verify_outputs(folder, job["identity"], execution):
             # Handles a crash after export but before the SQLite commit / cleanup.
-            self.store.update(job["id"], status="done", stage="Gotowe", progress=100)
+            manifest = read_json(folder / "gotowe.json") or {}
+            warning = manifest.get("terminal_reason") or {}
+            self.store.update(job["id"], status="done", stage="Gotowe: odzyskane audio" if warning else "Gotowe",
+                              progress=100, error=warning.get("message", ""), error_code=warning.get("code", ""),
+                              processed_until=manifest.get("processed_until", job.get("processed_until", 0)))
             cleanup(work, job)
             return
         if job["kind"] == "youtube":
@@ -154,6 +164,8 @@ class Worker:
                   "sample_rate": 16000, "audio_track": job["audio_track"],
                   "settings": config, "asr": asr, "diarization": diar, "uvr": uvr_report,
                   "audio_recovery": recovery,
+                  "processing_complete": complete, "source_complete": not bool(recovery),
+                  "coverage_unknown": bool(recovery),
                   "retained_audio": retained,
                   "diarization_blocks": diar_parts, "words": words, "segments": cues_from_words(words),
                   "notes": ["Etykiety mówców są automatyczne i dotyczą wyłącznie tego nagrania.",
@@ -165,7 +177,7 @@ class Worker:
         if not words:
             report["no_speech_reason"] = "no_recognized_speech"
         self.finish(job, folder, work, report, execution, complete)
-        if complete and not words:
+        if complete and not words and not recovery:
             self.store.update(job["id"], stage="Gotowe: brak wypowiedzi")
 
     def finish_empty(self, job, source, folder, work, execution, empty):
@@ -200,7 +212,7 @@ class Worker:
         duration, full_duration = report["processed_until"], report["duration"]
         self.progress("Atomowy zapis i sprawdzanie TXT, SRT, VTT, JSON", 0)
         if not complete:
-            failure = report.get("audio_recovery") or (report.get("uvr") or {}).get("failure", {})
+            failure = (report.get("uvr") or {}).get("failure") or report.get("audio_recovery") or {}
             report["incomplete_reason"] = failure
             report["coverage_unknown"] = bool(failure.get("coverage_unknown"))
             report["missing_intervals"] = [{"start": duration, "end": full_duration}] if duration < full_duration else []
@@ -210,8 +222,13 @@ class Worker:
             self.store.update(job["id"], progress=duration / full_duration * 100)
             self.save_error_log(job, failure.get("message", "Niepełny wokal UVR."))
             return
+        warning = report.get("audio_recovery") or {}
+        if warning:
+            report.update(source_complete=False, coverage_unknown=True, retry_recommended=False,
+                          preserve_work=True, terminal_reason=warning)
         export(folder, report, execution)
-        self.store.update(job["id"], status="done", stage="Gotowe", progress=100, error="", error_code="", processed_until=duration)
+        self.store.update(job["id"], status="done", stage="Gotowe: odzyskane audio" if warning else "Gotowe", progress=100,
+                          error=warning.get("message", ""), error_code=warning.get("code", ""), processed_until=duration)
         try:
             cleanup(work, job)
         except OSError as exc:
@@ -263,7 +280,15 @@ class Worker:
 
     def heartbeat(self, stopped):
         while not stopped.wait(5):
-            self.store.control(heartbeat=now())
+            try:
+                self.store.control(heartbeat=now())
+            except sqlite3.OperationalError as exc:
+                # Imports and queue updates can temporarily hold SQLite's write
+                # lock. A delayed heartbeat must not kill the heartbeat thread.
+                code = getattr(exc, "sqlite_errorcode", 0)
+                if (code & 255) not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} and "locked" not in str(exc).casefold():
+                    raise
+                logging.warning("Nie zapisano sygnału wykonawcy; ponowię przy następnej próbie: %s", exc)
 
     def cleanup_completed(self, scope):
         for job in self.store.jobs():
@@ -282,9 +307,11 @@ class Worker:
         try:
             self.processor(job)
         except MediaError as exc:
-            self.failure(job, exc, "media_" + exc.status, stop=exc.status == "blocked", status=exc.status)
+            if not self.skip_unreadable(job, exc, "media_" + exc.status):
+                self.failure(job, exc, "media_" + exc.status, stop=exc.status == "blocked", status=exc.status)
         except JobError as exc:
-            self.failure(job, exc, exc.code)
+            if not self.skip_unreadable(job, exc, exc.code):
+                self.failure(job, exc, exc.code)
         except ResourceError as exc:
             self.failure(job, exc, "resource_unavailable", stop=True)
         except Exception as exc:
@@ -292,6 +319,23 @@ class Worker:
         finally:
             self.store.control(current_id=None)
             self.current = None
+
+    def skip_unreadable(self, job, error, code):
+        if job["kind"] != "local" or not permanent_audio_failure(error, code):
+            return False
+        # A replaced/moved source is recoverable by reimport and must not be
+        # dismissed using the diagnosis from a different file version.
+        try:
+            if digest(Path(job["source"])) != job["identity"].split(":", 1)[1]:
+                return False
+        except OSError:
+            return False
+        self.store.skip(job["id"], str(error), code)
+        try:
+            self.save_error_log(job, str(error))
+        except OSError:
+            logging.exception("Nie udało się zapisać powodu pominięcia %s", job["id"])
+        return True
 
     def consume(self, max_jobs):
         processed = 0

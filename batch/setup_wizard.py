@@ -58,7 +58,9 @@ class SetupWizard:
         ttk.Label(outer, textvariable=self.help_status, wraplength=800, foreground="#44546a", justify="left").pack(anchor="w", fill="x")
         footer = ttk.Frame(outer)
         footer.pack(fill="x", pady=(10, 0))
-        ttk.Label(footer, text="Pobieranie modelu i próba nie uruchamiają kolejki filmów.").pack(side="left")
+        ttk.Button(footer, text="Wstecz", command=self.previous_step).pack(side="left")
+        self.next_step_button = ttk.Button(footer, text="Dalej", command=self.next_step)
+        self.next_step_button.pack(side="right", padx=8)
         self.button(footer, "Zamknij", self.close,
                     "Zamyka kreator i usuwa token z jego pola. Rozpoczęte pobieranie lub próba działają dalej w tle.").pack(side="right")
         for parent, padding in ((outer, 36), *((page, 32) for page in self.pages)):
@@ -76,6 +78,26 @@ class SetupWizard:
             self.progress_message.set("Model jest już na dysku. Możesz wykonać próbę bez wpisywania tokenu.")
             self.download_button.configure(text="Uruchom krótką próbę", state="normal")
         self.poll()
+
+    def previous_step(self):
+        if not self.checking and not WorkerLock.busy(self.app.root / "konfiguracja"):
+            self.tabs.select(max(0, self.tabs.index(self.tabs.select()) - 1))
+
+    def next_step(self):
+        index = self.tabs.index(self.tabs.select())
+        if self.checking or WorkerLock.busy(self.app.root / "konfiguracja"):
+            return
+        if index == 0:
+            self.tabs.select(1)
+        elif index == 1:
+            if self.verified == self.fingerprint():
+                self.tabs.select(2)
+            else:
+                self.check()
+        elif self.local_ready:
+            self.close()
+        else:
+            self.download()
 
     def button(self, parent, text, action, hint, **kwargs):
         return help_button(parent, text, action, hint, self.help_status, **kwargs)
@@ -273,6 +295,9 @@ class SetupWizard:
 
     def show_state(self, state, busy):
         self.last_state, self.last_busy = state, busy
+        if state.get("phase") in {"whisper_complete", "download_whisper"}:
+            self.progress_message.set("To stan modelu Whisper. Community-1 wymaga osobnego sprawdzenia dostępu i pobrania.")
+            return
         self.progress_message.set(redact(state.get("message", "")))
         phase = state.get("state")
         if phase == "running" and busy:
@@ -297,6 +322,10 @@ class SetupWizard:
                      and time.monotonic() - (self.started or self.opened) < 4)
         if state and state_changed and not launching:
             self.show_state(state, busy)
+        index = self.tabs.index(self.tabs.select())
+        label = ("Dalej", "Sprawdź dostęp i przejdź dalej", "Zakończ" if self.local_ready else "Pobierz model")[index]
+        self.next_step_button.configure(text="Poczekaj…" if busy or self.checking else label,
+                                        state="disabled" if busy or self.checking else "normal")
         self.after_id = self.dialog.after(400, self.poll)
 
     def open_test_results(self):
