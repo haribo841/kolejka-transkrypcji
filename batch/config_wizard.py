@@ -13,6 +13,7 @@ from .ui_help import help_button, wrap_with_parent
 
 STEPS = ("Whisper i narzędzia", "Opcjonalny UVR", "Opcjonalni mówcy", "Opcjonalny YouTube", "Próba i zakończenie")
 READY = {AVAILABLE, PASSED, OFF}
+MODEL_STATE_FILE = "konfiguracja-modelu.json"
 
 
 class ConfigurationWizard:
@@ -194,7 +195,7 @@ class ConfigurationWizard:
 
     def operation_message(self):
         if self.operation:
-            name = "konfiguracja-uvr.json" if self.operation == "uvr" else "konfiguracja-modelu.json"
+            name = "konfiguracja-uvr.json" if self.operation == "uvr" else MODEL_STATE_FILE
             state = read_json(self.app.root / name, {})
             if state != self.before_state:
                 return state.get("message", "Trwa przygotowanie. Poczekaj…")
@@ -222,7 +223,7 @@ class ConfigurationWizard:
         if self.busy() or self.app.readiness_busy or not self.action()[1]:
             return
         if self.index == 0 and not self.ready("whisper"):
-            before = read_json(self.app.root / "konfiguracja-modelu.json", {})
+            before = read_json(self.app.root / MODEL_STATE_FILE, {})
             if self.app.setup_process({"download_whisper": True}):
                 self.started_operation("whisper", before)
         elif self.index == 1 and self.uvr.get() and not self.ready("uvr"):
@@ -245,7 +246,7 @@ class ConfigurationWizard:
             self.close()
             return
         path = filedialog.askopenfilename(parent=self.dialog, title="Nagranie z mową do próby (do 60 sekund)")
-        before = read_json(self.app.root / "konfiguracja-modelu.json", {})
+        before = read_json(self.app.root / MODEL_STATE_FILE, {})
         if path and self.app.setup_process({"test_only": True, "source": path, "track": 0,
                                            "language": self.app.config.get("language", "auto")}):
             self.started_operation("trial", before)

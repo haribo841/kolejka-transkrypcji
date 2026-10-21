@@ -161,7 +161,7 @@ class DamagedMediaTests(unittest.TestCase):
         self.assertAlmostEqual(result["processed_until"], .2, places=3)
         self.assertTrue(result["timeline"]["recovery"]["coverage_unknown"])
         self.assertEqual(result["failure"], {})
-        self.assertEqual(sf.info(result["output"]).frames, round(.2 * UVR_RATE))
+        self.assertEqual(sf.info(result["output"]).frames, UVR_RATE // 5)
         self.assertEqual(len(calls), 1)
         self.assertTrue(all(part["complete_block"] for part in result["blocks"]))
         self.assertEqual(digest(self.source), self.source_hash)

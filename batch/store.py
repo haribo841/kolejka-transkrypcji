@@ -23,6 +23,7 @@ SCOPE_KINDS = ("all", "youtube", "local")
 SCOPE_MODES = ("legacy", "visible", "selected")
 BEGIN_WRITE = "BEGIN IMMEDIATE"
 SELECT_CONTROL = "SELECT * FROM control WHERE id=1"
+SELECT_JOB = "SELECT * FROM jobs WHERE id=?"
 
 
 def scope_kind(value):
@@ -258,7 +259,7 @@ class Store:
 
     def get(self, job_id):
         with self.connect() as db:
-            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = db.execute(SELECT_JOB, (job_id,)).fetchone()
             return dict(row) if row else None
 
     def update(self, job_id, **values):
@@ -375,7 +376,7 @@ class Store:
         """Archive an unprocessable source without inventing a transcription."""
         with self.connect() as db:
             db.execute(BEGIN_WRITE)
-            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            job = db.execute(SELECT_JOB, (job_id,)).fetchone()
             if job is None:
                 return
             metadata = json.loads(job["source_meta"])
@@ -435,7 +436,7 @@ class Store:
                 raise ValueError("Najpierw dokończ bieżące nagranie i zatrzymaj sesję.")
             selected = []
             for ident in ids:
-                row = db.execute("SELECT * FROM jobs WHERE id=?", (ident,)).fetchone()
+                row = db.execute(SELECT_JOB, (ident,)).fetchone()
                 if row is None:
                     raise ValueError("Nie znaleziono wybranego nagrania.")
                 selected.append(self.prepare_output_change(dict(row), mode, custom))

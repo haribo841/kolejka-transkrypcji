@@ -164,12 +164,15 @@ def local_entry(store, path, config, output_mode, output_root):
         metadata["skip_reason"] = {"code": metadata["probe_error_code"], "message": error}
     if metadata.get("probe_error_code") == "no_audio":
         status = "skipped"
+    stage = "Walidacja pliku" if error else ""
+    if status == "skipped":
+        stage = "Zakończono: pominięte"
     entry = {"identity": "local:" + checksum, "kind": "local", "source": str(path), "title": path.stem,
             "date": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
             "duration": duration, "meta": metadata, "output_root": base,
             "status": status,
             "error_code": metadata.get("probe_error_code", ""), "error": error,
-            "stage": "Zakończono: pominięte" if status == "skipped" else ("Walidacja pliku" if error else "")}
+            "stage": stage}
     return validate_local_output(store, entry)
 
 

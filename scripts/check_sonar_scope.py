@@ -15,8 +15,9 @@ def test_module(name):
 
 
 def scope_errors(text, files):
-    properties = dict(line.split("=", 1) for line in text.splitlines()
-                      if line.strip() and not line.lstrip().startswith("#"))
+    properties = {key: value for key, value in (
+        line.split("=", 1) for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#"))}
     expected = {name for name in files if test_module(name)}
     errors = []
     for key in SCOPE_KEYS:
