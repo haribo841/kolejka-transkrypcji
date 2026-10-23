@@ -15,10 +15,13 @@ def test_module(name):
 
 
 def scope_errors(text, files):
-    properties = dict(
-        line.split("=", 1) for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    )
+    # Parse entries directly: dict(generator) triggers S7494, while a copying
+    # comprehension triggers S7500. Split once to preserve '=' in values.
+    properties = {}
+    for line in text.splitlines():
+        if line.strip() and not line.lstrip().startswith("#"):
+            key, value = line.split("=", 1)
+            properties[key] = value
     expected = {name for name in files if test_module(name)}
     errors = []
     for key in SCOPE_KEYS:
