@@ -1,0 +1,5 @@
+01 - Signal processing lecture
+[00:00:12.300 - 00:00:16.900] Mówca 1: Let's compare the signal with its spectrum.
+[00:00:17.400 - 00:00:21.800] Mówca 2: Which sampling frequency should we use?
+[00:00:22.200 - 00:00:29.300] Mówca 1: Choose a frequency above twice the highest frequency of interest.
+[00:00:30.100 - 00:00:36.400] Mówca 2: Let's review the plot before we continue.

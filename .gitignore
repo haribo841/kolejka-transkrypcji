@@ -31,6 +31,9 @@ worker.lock
 !/requirements*.txt
 *.srt
 *.vtt
+# Public documentation examples generated from illustrative text.
+!/docs/examples/demo-transcript.txt
+!/docs/examples/demo-transcript.srt
 *cookies*.txt
 *cookie*.json
 *token*.txt

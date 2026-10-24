@@ -1,154 +1,88 @@
-# Transcription Queue
+# Kolejka transkrypcji
 
-A Windows desktop application built with Python and Tkinter/ttk for processing YouTube videos and local audio or video recordings. It downloads audio, optionally separates vocals, transcribes speech locally with Whisper/OpenVINO, and identifies speakers. SQLite stores queue progress; completed recordings are exported to TXT, SRT, VTT, and JSON.
+**Turn recordings into timestamped transcripts and subtitles on your Windows PC.**
 
-[User guide (Polish)](KOLEJKA.md) | [Validation notes (Polish)](docs/WERYFIKACJA.md) | [Repository migration (Polish)](docs/MIGRACJA.md) | [MIT license](LICENSE)
+Queue local audio, video or a YouTube catalog, let it process, then pick up where you left off. Speech recognition runs locally with Whisper and OpenVINO.
 
-## Features
+[**Download source ZIP**](https://github.com/haribo841/kolejka-transkrypcji/archive/refs/heads/master.zip) · [Quick start](#quick-start) · [Documentation](docs/README.md) · [Report an issue](https://github.com/haribo841/kolejka-transkrypcji/issues)
 
-- Import a YouTube catalog from XLSX, individual local files, or folders with subfolders. Repeated imports recognize duplicate content and preserve progress.
-- Separate YouTube and local queue tabs. Local Start processes every enabled recording; a separate selected-jobs button limits a session without disabling other jobs.
-- Jump to the current recording or the first enabled pending job. Lists show duration and retain scrolling and selection during refreshes.
-- A configuration tab with background checks and a dated sample test of up to 60 seconds using the current vocal separation and speaker settings.
-- Choose where local results are saved: a dedicated subfolder beside the source, the central results directory, or a custom directory. Existing jobs retain their destinations.
-- Process one recording at a time, in chronological order, with search, filters, language overrides, and audio track selection.
-- Start or resume a session, or finish the current recording and then stop. The worker continues when the window closes; reopening the application reconnects to the queue.
-- Start stays visibly pressed during launch and processing, prevents repeated launches, and returns to its idle state when the worker stops. Failed preflight checks show their reason and restore the button.
-- Resume transcription, speaker diarization, and vocal separation from verified checkpoints after an interruption.
-- If source audio contains damaged packets, retry decoding once while retaining its timeline. Recovered audio finishes as Done with a damage warning once all decodable samples have been processed. JSON distinguishes completed processing from an incomplete source. Permanently unreadable inputs are archived as Skipped with a reason and are hidden from the default queue. Decoder logs, audio and checkpoints are retained; the same damaged source is not retried automatically.
-- Whisper large-v3-turbo through OpenVINO GenAI on CPU, word timestamps, pyannote Community-1 for speaker diarization, and optional Universal Vocal Remover (UVR) through audio-separator.
-- Optionally retain source audio and the separated vocal track. Original local files remain untouched.
-- Unique output names based on the recording ID, atomic writes, and versioned exports when an output name is already occupied.
-- A transcript editing tab that creates TXT/SRT/VTT copies without speaker labels, preserving timestamps and spoken text.
-- Delayed tooltips, CSV progress reports, and optional YouTube session settings with a test of one video link.
+[![Windows checks](https://github.com/haribo841/kolejka-transkrypcji/actions/workflows/python.yml/badge.svg?branch=master)](https://github.com/haribo841/kolejka-transkrypcji/actions/workflows/python.yml)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=haribo841_WebApplication1&metric=alert_status)](https://sonarcloud.io/dashboard?id=haribo841_WebApplication1)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-This repository contains application code and pinned dependency files. Models, Python environments, private video catalogs, cookies, tokens, and processing results are kept locally. Transcription runs directly through OpenVINO and does not require Audacity.
+![The Windows application showing a stopped local queue, recording durations, output settings and separate controls for visible or selected recordings.](docs/assets/readme/local-queue.jpg)
 
-## Requirements
+*Actual application with demonstration data. The interface is in Polish; this README and the getting-started guide are in English.*
 
-- Windows 10 or 11, Python 3.13 for the main environment, and Python 3.12 for speaker diarization and optional UVR. Installers use the `py` launcher or explicitly supplied interpreter paths.
-- FFmpeg and FFprobe 9, plus Node.js 22, available on `PATH` or configured by their full paths. The Windows CI workflow uses FFmpeg 8.0.1.
-- Disk space for models, temporary audio, and any retained recordings. Mono float32 PCM at 16 kHz uses approximately 64 kB per second; vocal separation needs additional space.
-- Internet access for the initial model downloads and for YouTube recordings. Community-1 requires accepting the model's access conditions and a Hugging Face token with Read permissions.
+## Quick start
 
-Whisper uses CPU by default. The separate diarization and UVR environments use PyTorch with CUDA 12.6. These stages check GPU execution and fall back to CPU with a message if GPU processing fails. Detecting a device does not guarantee that every model and driver combination can use it.
+**Platform:** Windows 10 or 11. The basic setup needs Python 3.13 and FFmpeg/FFprobe. Python 3.12 is needed for optional speaker labels and vocal separation; Node.js 22 is used for YouTube. See [prerequisites and installation](docs/GETTING_STARTED.md#prerequisites).
 
-## Installation and first test
+1. **Download** the source ZIP above and extract it, or clone this repository. The current distribution is source code, not a standalone installer.
+2. **Install and open** the local queue from PowerShell in the extracted folder:
 
-Open PowerShell in the cloned repository:
+   ```powershell
+   .\Instaluj-zaleznosci.ps1 -WithoutSpeakers
+   .\Uruchom-kolejke-lokalna.vbs
+   ```
 
-```powershell
-.\Instaluj-zaleznosci.ps1
-.\.venv\Scripts\python.exe transcribe.py download
-# Optional vocal separation:
-.\Instaluj-UVR.ps1
-.\Uruchom-kolejke.vbs
+3. **Configure once:** open **Konfiguracja → Kreator krok po kroku**. Download Whisper; turn off UVR and speaker labels for the simplest first run. Complete the sample test on up to 60 seconds of speech.
+4. **Add recordings:** use **Dodaj pliki** or **Dodaj folder...**, choose where to save results, then click **Start/Wznów widoczne (N)**. To stop later, choose **Dokończ bieżący i zatrzymaj**; the current recording finishes and the rest wait for your next Start.
+
+[Step-by-step setup, optional models and troubleshooting →](docs/GETTING_STARTED.md)
+
+## What you can do
+
+- **Process a recording archive.** Import local files or folders with subfolders, or a YouTube XLSX catalog. Supported formats include WAV, MP3, M4A, FLAC, OGG/Opus, MP4, MKV, WebM, MOV and AVI.
+- **Resume without starting over.** SQLite tracks progress and verified checkpoints preserve completed blocks. Reimporting identical local content does not create another job.
+- **Choose your session.** Search, filter and sort either queue, then process its visible recordings or a selected subset. The session keeps that order even if you change the view.
+- **Export useful text.** Every recording gets its own TXT, SRT, VTT and JSON results, with timestamps and optional speaker labels. Local results can live beside the source or in a chosen folder.
+- **Handle difficult audio locally.** Optionally separate vocals with UVR and distinguish speakers with pyannote Community-1. Model setup is separate from starting the queue.
+- **Clean up transcripts.** Remove speaker labels from existing TXT/SRT/VTT files while preserving timestamps, spoken text and originals. No audio inference is repeated.
+
+Local inference stays on your PC. Initial model downloads and YouTube access require an internet connection. Audacity is not required.
+
+## Example result
+
+An illustrative TXT export looks like this; subtitle and JSON files accompany it:
+
+```text
+[00:00:12.300 - 00:00:16.900] Mówca 1: Let's compare the signal with its spectrum.
+[00:00:17.400 - 00:00:21.800] Mówca 2: Which sampling frequency should we use?
 ```
 
-The installers use the versions in `requirements-*.lock.txt`. To supply your own Python interpreters:
+[Open the example TXT](docs/examples/demo-transcript.txt) · [Open the example SRT](docs/examples/demo-transcript.srt)
 
-```powershell
-.\Instaluj-zaleznosci.ps1 -AsrInterpreter 'C:\Python313\python.exe' -DiarizationInterpreter 'C:\Python312\python.exe'
-.\Instaluj-UVR.ps1 -Interpreter 'C:\Python312\python.exe'
-```
+<details>
+<summary>See transcript editing: keep the times and text, remove the speaker labels</summary>
 
-In the configuration tab, choose **Kreator krok po kroku** for a guided setup: Whisper/tools, optional UVR, optional speakers, optional YouTube, then a sample test. Next waits for each operation to finish. You may disable optional stages. In the Community-1 setup, accept the access conditions on the [model page](https://huggingface.co/pyannote/speaker-diarization-community-1), verify your Read token, and download the model. Enable or disable vocal separation and speaker diarization, then run a sample test. You can select a long recording; the test processes up to 60 seconds. Review the transcript and speaker labels before starting a large session. Importing recordings never starts processing automatically.
+![The transcript tools tab showing the original transcript beside a preview with speaker labels removed and timestamps retained.](docs/assets/readme/transcript-tools.jpg)
 
-The interface is currently in Polish. These are the main controls:
+The preview uses the illustrative example linked above. Saving creates a separate copy.
 
-| Action | Label in the application |
+</details>
+
+## Built with
+
+| Component | Purpose |
 | --- | --- |
-| Open configuration | Konfiguracja |
-| Set up speaker diarization | Konfiguracja Community-1 |
-| Test a recording sample | Sprawdź na fragmencie |
-| Select a folder and import its recordings | Dodaj folder... |
-| Import from the entered folder path | Dodaj z podanej ścieżki |
-| Start or resume the visible YouTube queue | Start/Wznów widoczne (N) |
-| Start or resume the visible local queue | Start/Wznów widoczne (N) |
-| Start selected jobs in either queue | Start zaznaczonych (N) |
-| Resume a missing tail | Wznów brakującą część |
-| Open verified partial text | Otwórz częściowy TXT |
-| Open a recording's error log | Otwórz log błędu |
-| Finish the current recording, then stop | Dokończ bieżący i zatrzymaj |
-| Retry failed jobs | Ponów nieudane |
-| Process selected YouTube jobs only | Start tylko zaznaczonych |
-| Configure YouTube access | Dostęp YouTube |
+| Python · Tkinter/ttk | Windows desktop UI and a separate queue worker |
+| SQLite · SHA-256 | Durable queue state, content identity and checkpoint verification |
+| FFmpeg/FFprobe · yt-dlp | Media decoding, audio track discovery and YouTube downloads |
+| OpenVINO GenAI · Whisper large-v3-turbo | Local speech recognition and word timestamps; CPU by default |
+| pyannote Community-1 · audio-separator/UVR | Optional speaker diarization and vocal separation |
 
-## Data directory
-
-The default data directory is `%USERPROFILE%\Transkrypcje`, outside the repository. Set `KOLEJKA_ROOT` before launching the application, or pass `--root` to use another directory:
-
-```powershell
-.\.venv\Scripts\python.exe kolejka.py --root 'D:\Transcriptions' gui
-.\.venv\Scripts\python.exe kolejka.py --root 'D:\Transcriptions' status
+```mermaid
+flowchart LR
+    A[Local media or YouTube] --> B[SQLite queue and checkpoints]
+    B --> C[FFmpeg and local AI]
+    C --> D[TXT / SRT / VTT / JSON]
 ```
 
-Existing databases and results are not moved automatically. To reuse a data directory, check the model and tool paths in its `ustawienia.json` first. Each database allows one worker at a time. An existing installation can remember its data directory in the local, Git-ignored `lokalna-instalacja.json` file using the `root` field. The `--root` argument and `KOLEJKA_ROOT` environment variable take precedence.
+For implementation details, see [architecture and recovery guarantees](docs/ARCHITECTURE.md). The [Windows CI workflow](.github/workflows/python.yml) checks locked dependencies, source compilation and offline tests covering queues, media decoding, GUI behavior and exports.
 
-## Local recordings
+## Documentation and support
 
-The folder picker imports recordings as soon as you confirm the selected folder. To scan a pasted or saved path, use the adjacent import button or press Enter in the path field. You can also add individual files. `Uruchom-kolejke-lokalna.vbs` opens the local queue with the last selected folder.
+[Documentation index](docs/README.md) · [Architecture](docs/ARCHITECTURE.md) · [Detailed user guide (Polish)](KOLEJKA.md) · [Issues](https://github.com/haribo841/kolejka-transkrypcji/issues) · [MIT license](LICENSE)
 
-The subfolder option scans every level when you next add a folder. Changing it alone does not import files. M4A-only limits that scan to M4A; otherwise it includes all supported audio and video formats. Scanning skips the application's result folders, symbolic links, and junctions, and reports inaccessible directories. Confirmed Python environments, installed package directories and textual TypeScript, CMake and Qt `.ts` files are excluded by default. **Pliki techniczne** includes them on the next scan; explicitly adding an individual file also allows an intentional test recording. MPEG transport streams remain supported.
-
-After import, the list immediately shows and selects the matching jobs, including existing ones. The summary distinguishes file paths, new unique recordings, existing jobs and duplicate copies. It reports separate causes for media validation, output paths and access failures; **Raport importu** opens the complete JSON report. An empty scan shows an explicit message. Files with the same SHA-256 share one queue entry, even if their names differ. Reimporting does not reset completed work or failed jobs; retry repairable failures and start the queue manually. Readable videos without an audio stream, empty recordings and successfully decoded silence can complete with an empty transcript. Damaged containers and unsupported codecs remain individual errors.
-
-See the [folder import and UVR timing fixes (Polish)](docs/NAPRAWA-2026-10-11.md) for the regression cases and local validation.
-
-Choose an output destination before importing. By default, each new recording receives a separate subfolder beside its source, with a short title and stable ID. You can change the destination of selected jobs that have not started. Manual destination changes leave completed or partially processed results in place. An automatic path-length fallback preserves a verified copy of existing work and keeps the previous directory. FFmpeg handles audio and video, including WAV, MP3, M4A/AAC, FLAC, OGG/Opus, MKV, MP4, WebM, MOV, and AVI. A recording with no recognized speech receives all four exports and the status **Gotowe: brak wypowiedzi**. Empty sources are recorded explicitly in JSON; decoding failures and damaged files are not counted as successful silence.
-
-New folder and export names share a Windows path budget. Longer source directories shorten the title portion while keeping the recording ID, partial marker and export version; existing filenames remain unchanged. If a destination is still too long, the application automatically selects a short, stable directory under the central results folder and continues. The actual destination and the reason for the fallback are saved per job. Existing path-length failures can be resumed with Start; checkpoints and retained audio are copied with hash verification before the destination changes. A deep duplicate of an existing recording keeps the original job's output location without requiring a new destination.
-
-Starting the local queue does not start YouTube jobs. If another session is active, finish its current recording and stop it before switching queues. Resuming reuses the existing checkpoints and results; closing the window leaves the worker running. Vocal separation and audio retention settings are shared by both queues.
-
-**Start/Wznów widoczne (N)** processes eligible, enabled recordings remaining in the current table after its search and filters. **Start zaznaczonych (N)** processes the selected eligible, visible and enabled subset. Both queues use the table's order. The session saves its ordered recording IDs at Start, so later sorting, filtering and imports apply to the next Start. The session banner shows its scope and remaining recordings. A completed job, file error, or partial result advances to the next recording. Missing shared models, exhausted memory, insufficient disk space, and a user stop request pause the session.
-
-Click a column heading to cycle through ascending order, descending order and the original chronological order. The active heading displays ▲ or ▼. Text comparison is case-insensitive and respects Polish letters; dates, duration, progress and audio tracks use their underlying values, with unknown values last in both directions. **Pomiń przetworzone** in the title heading moves completed recordings to the end in their original order while sorting is active. Partial recordings remain sorted. The third heading click restores the full original order even when the checkbox is checked. Each queue remembers its own sort and checkbox settings; refreshes preserve the selection and scroll position. The existing CLI defaults remain chronological and are independent of table filters.
-
-See the [sorting and session-order validation notes](docs/SORTING-2026-10-14.md).
-
-UVR uses the selected audio track's sample positions on the video clock. A successfully decoded source track that ends before the video is padded with silence; missing model output is never stretched or silently replaced with silence. If UVR truncates vocals, valid blocks and a verified prefix are retained, followed by one recovery pass over the missing tail in 60-second blocks with the normal context overlap.
-
-If recovery still fails, the valid vocal prefix is transcribed and exported as **Częściowo gotowe**. Partial TXT, SRT, VTT, and JSON filenames include `_czesciowa`; their JSON and `czesciowe.json` marker identify the full duration, processed boundary, and error. `gotowe.json` is reserved for verified complete exports. Audio and checkpoints stay available. Every later Start attempts each enabled partial recording once, then continues to the next job if it fails again. Unchanged ASR and diarization blocks are reused by audio content; extending a tail only recomputes new blocks and affected context boundaries. Recordings with no usable vocal prefix remain errors.
-
-See the [recovery implementation and local validation notes](docs/RECOVERY-2026-10-13.md).
-
-To open the local tab with a chosen folder, without importing or starting processing:
-
-```powershell
-.\.venv\Scripts\python.exe kolejka.py gui --local-folder 'D:\Recordings'
-```
-
-## YouTube access and outputs
-
-Downloads are anonymous by default. The access dialog detects Chrome and Edge and offers a dedicated browser window for the application. The login button selects this option automatically when no session has been chosen. Sign in once in that window, open the video, and leave the window open or minimized. The test and downloader read the current YouTube session from that local window; no manual `cookies.txt` export is needed. The browser keeps its own profile beside the queue settings, separate from your regular browser profiles. Closing the window requires reopening it before resuming YouTube downloads.
-
-The same screen also lists existing Firefox/Chrome/Edge profiles. Advanced settings retain manual profile paths and Netscape-format `cookies.txt` imports. Profile discovery does not read cookies; session access happens when you explicitly test a link or start processing. Only YouTube cookies are passed to the downloader, held in memory and excluded from application logs and reports. A successful test can be confirmed with one button without starting the queue. YouTube access settings do not block the local queue.
-
-Sign in and complete any YouTube confirmation in your browser. A session does not guarantee that account or IP restrictions will be lifted. If browser access fails and Firefox is available, the dialog offers a button to select its profile and open the login page. See the [yt-dlp documentation](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
-
-Each recording has its own directory, with output filenames containing its YouTube ID or local content hash. A job is marked complete only after the full set of exports has been written and verified. Review the recognized text, language, and speaker labels: music, overlapping voices, and block boundaries can cause recognition errors.
-
-The transcription, diarization, and vocal separation stages process audio locally. Keep cookies and Hugging Face tokens out of the repository. Model weights and third-party libraries have their own licenses and access conditions.
-
-## Tests and single-file transcription
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -v
-.\.venv\Scripts\python.exe transcribe.py transcribe 'D:\Recordings\lecture.mp4' --language auto --word-timestamps
-.\.venv\Scripts\python.exe transcribe.py transcribe --help
-```
-
-The test suite uses synthetic data and temporary directories. YouTube downloads and neural model calls are replaced with controlled test doubles. FFmpeg integration tests use generated audio and video; these tests are skipped if the tools are unavailable. Windows CI installs the pinned application and test dependencies plus FFmpeg 8.0.1, then runs the same offline suite. Local installations using FFmpeg 9 keep their version. Tests with real model weights and recordings are separate from the offline suite and are documented in the [validation notes](docs/WERYFIKACJA.md).
-
-SonarQube Cloud uses automatic analysis configured in [.sonarcloud.properties](.sonarcloud.properties). The Python versions are 3.12 and 3.13, matching the installed environments. Test files are explicitly listed under `sonar.tests` and excluded from the production scope. When adding a test file, update both lists in that configuration. Production files remain in scope; no rules are suppressed.
-
-Before publication, run `python scripts/check_sonar_scope.py` and the offline test suite. To enable the repository's local pre-push guard, run `git config --local core.hooksPath .githooks`. If Python is not available as `python3` or `py`, set `git config --local kolejka.qualityPython 'C:/Path/To/python.exe'`. Check an existing `core.hooksPath` setting before replacing it so any existing hooks are preserved. The guard validates the exact Git trees being pushed, including multiple refs; an unstaged fix cannot hide an invalid committed configuration. CI performs the same check. This guard checks test classification and accidental production exclusions; it is not a full Sonar analysis or a guarantee of a passing Quality Gate.
-
-[SonarQube for IDE connected mode](https://docs.sonarsource.com/sonarqube-for-vs-code/connect-your-ide/setup) can synchronize the project's rule profile and display issues while editing. Connect to SonarQube Cloud and bind to `haribo841_WebApplication1`; keep the personal token in the extension's credential store. The extension does not replace the full project analysis: [injection vulnerabilities](https://docs.sonarsource.com/sonarqube-for-vs-code/using/taint-vulnerabilities) are downloaded after server analysis. No editor connection or credentials are created by the pre-push guard.
-
-## Repository history
-
-The former ASP.NET Core XML CRUD exercise remains available in [Git history](https://github.com/haribo841/kolejka-transkrypcji/tree/0b078d310db7922928e4ffe67f9c6121dd16570b). Its migration was published on 7 October 2026 in [Evaluation-tasks/Evaluation-task1](https://github.com/haribo841/Evaluation-tasks/tree/025cbdcd308ebb929f53b4b5244f830eec096038/Evaluation-task1), alongside tasks 2 and 3.
-
-The archive includes the [original CRUD README](docs/archive/README-aspnetcore-xml-crud-2026-10-06.md), the [queue README before the local tab](docs/archive/README-kolejka-2026-10-08.md), and the [README before this English rewrite](docs/archive/README-kolejka-2026-10-11.md). See the [migration notes](docs/MIGRACJA.md) for details.
+The MIT license covers this application; model weights and dependencies retain their own licenses and access conditions. [Previous README, preserved verbatim](docs/archive/README-kolejka-2026-10-24.md).
