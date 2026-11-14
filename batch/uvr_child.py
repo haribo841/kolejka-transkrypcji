@@ -44,8 +44,11 @@ def separator(config, output, online=False, force_cpu=False):
             raise RuntimeError("UVR pracuje offline. Pobierz kompletny model przed uruchomieniem kolejki.")
         requests.sessions.Session.request = offline
     from audio_separator.separator import Separator
+    stem = config.get("uvr_stem", "Vocals")
+    if stem not in {"Vocals", "Instrumental"}:
+        raise ValueError("Nieobsługiwana ścieżka separacji UVR.")
     engine = Separator(log_level=logging.WARNING, model_file_dir=str(directory),
-        output_dir=str(output), output_format="WAV", output_single_stem="Vocals",
+        output_dir=str(output), output_format="WAV", output_single_stem=stem,
         use_soundfile=True, normalization_threshold=1.0, amplification_threshold=0.0,
         sample_rate=UVR_RATE, mdx_params={"hop_length": 1024, "segment_size": 256,
                                        "overlap": .25, "batch_size": 1, "enable_denoise": False})

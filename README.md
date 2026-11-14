@@ -33,6 +33,8 @@ Queue local audio, video or a YouTube catalog, let it process, then pick up wher
 
 ## What you can do
 
+- **Prepare YouTube localizations.** Review Polish primary metadata and English translations, generate timed PL/EN subtitles locally, prepare a voiceless audio stem and track publication separately. Google API publishing requires a connected account and explicit confirmation. [Localization guide](docs/LOCALIZATION.md).
+
 - **Process a recording archive.** Import local files or folders with subfolders, or a YouTube XLSX catalog. Supported formats include WAV, MP3, M4A, FLAC, OGG/Opus, MP4, MKV, WebM, MOV and AVI.
 - **Resume without starting over.** SQLite tracks progress and verified checkpoints preserve completed blocks. Reimporting identical local content does not create another job.
 - **Choose your session.** Search, filter and sort either queue, then process its visible recordings or a selected subset. The session keeps that order even if you change the view.

@@ -1,5 +1,7 @@
 # Documentation
 
+- [YouTube localizations: Polish/English metadata, reviewed subtitles and voiceless audio](LOCALIZATION.md)
+
 Kolejka transkrypcji is a Windows application for local speech transcription, subtitle export and resumable batch processing. The interface is in Polish. The guides below explain the workflow in English and identify the labels used in the app.
 
 ## Start here

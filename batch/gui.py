@@ -79,7 +79,9 @@ class QueueWindow:
         self.notebook = ttk.Notebook(self.window)
         self.notebook.pack(fill="both", expand=True)
         self.queue_page, self.local_page, self.processing_page, self.config_page = (ttk.Frame(self.notebook) for _ in range(4))
+        self.localization_page = ttk.Frame(self.notebook)
         for page, title in ((self.queue_page, "Kolejka YouTube"), (self.local_page, "Kolejka lokalna"),
+                            (self.localization_page, "Lokalizacje YouTube"),
                             (self.processing_page, "Obróbka transkrypcji"), (self.config_page, "Konfiguracja")):
             self.notebook.add(page, text=title)
         Tooltip(self.notebook, "YouTube i pliki lokalne mają oddzielne listy. Konfiguracja jest wspólna.", self.help_status, popup=False)
@@ -87,6 +89,8 @@ class QueueWindow:
         self.local_tab = LocalQueueTab(self, self.local_page)
         self.controls["files"], self.controls["folder"] = self.local_tab.controls["files"], self.local_tab.controls["browse"]
         self.transcript_tab = TranscriptTab(self, self.processing_page)
+        from .localization.tab import LocalizationTab
+        self.localization_tab = LocalizationTab(self, self.localization_page)
         from .config_tab import ConfigurationTab
         self.config_tab = ConfigurationTab(self, self.config_page)
         self.notebook.bind("<<NotebookTabChanged>>", self.queue_changed)
@@ -230,6 +234,7 @@ class QueueWindow:
         if wizard and not wizard.closed:
             wizard.close()
         self.transcript_tab.close()
+        self.localization_tab.close()
         self.local_tab.close()
         self.table_view.close()
         if self.setup_dialog and not self.setup_dialog.closed:

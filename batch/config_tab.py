@@ -29,6 +29,8 @@ class ConfigurationTab:
                     "Przetwarza do 60 sekund wybranego lokalnego pliku lub nagrania wskazanego w oknie wyboru.").pack(side="left", padx=(0, 8))
         help_button(tools, "Otwórz wyniki próby", self.open_test,
                     "Otwiera folder wyników ostatniej zakończonej próby.").pack(side="left")
+        help_button(tools, "Kreator lokalizacji YouTube", app.localization_tab.configure,
+                    "Osobne połączenie Google do publikacji tytułów, opisów i napisów oraz lokalny model tłumaczeń.").pack(side="left", padx=8)
         content = ttk.Frame(frame)
         canvas = tk.Canvas(content, highlightthickness=0,
                            background=ttk.Style(parent).lookup("TFrame", "background") or "#f0f0f0")

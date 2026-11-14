@@ -72,7 +72,7 @@ class LocalTabTests(unittest.TestCase):
 
     def test_separate_tabs_lists_counts_and_tooltips(self):
         titles = [self.app.notebook.tab(tab, "text") for tab in self.app.notebook.tabs()]
-        self.assertEqual(titles, ["Kolejka YouTube", "Kolejka lokalna", "Obróbka transkrypcji", "Konfiguracja"])
+        self.assertEqual(titles, ["Kolejka YouTube", "Kolejka lokalna", "Lokalizacje YouTube", "Obróbka transkrypcji", "Konfiguracja"])
         self.assertEqual(set(self.app.tree.get_children()), {str(self.youtube_id)})
         self.assertEqual(set(self.app.local_tab.tree.get_children()), {str(i) for i in self.local_ids})
         self.assertIn("Lokalne: 2", self.app.local_tab.counts.get())
