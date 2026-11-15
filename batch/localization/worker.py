@@ -157,7 +157,7 @@ class Runner:
                 self.api = YouTube(self.store)
             if mode == "sync":
                 sync_catalog(self.store, self.api, ids, self.progress)
-                self.store.session(message="Odświeżanie zakończone. Korekty i kolejka transkrypcji zachowane.")
+                self.store.session(cursor=len(ids), message="Odświeżanie zakończone. Korekty i kolejka transkrypcji zachowane.")
             else:
                 self.consume(request)
         except (AuthError, QuotaError, RuntimeError, OSError, ValueError) as error:

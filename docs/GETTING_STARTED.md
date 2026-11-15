@@ -70,6 +70,14 @@ At Start, the app saves the ordered job IDs for that session. Later view changes
 
 **Dokończ bieżący i zatrzymaj** finishes the entire current recording and then stops. Closing the window leaves the worker running. Reopening the same data directory reconnects to its progress. Start is always manual.
 
+## Rerun an incorrect transcript
+
+Select one recording and click **Transkrybuj ponownie…** in either queue. The same button is available in the PL/EN subtitle editor. Completed recordings can be rerun without resetting the rest of the queue.
+
+Choose the retained original mix or UVR vocal, the spoken language and block length. The default is 60-second blocks. Use **Angielski** for English speech even when preparing Polish subtitles: transcription and translation are separate steps. A retry starts fresh Whisper checkpoints; an interrupted retry resumes only its own completed blocks. Changing the input or language can help, but rerunning does not guarantee different recognition.
+
+Old TXT/SRT/VTT/JSON versions, audio and checkpoints remain on disk. A failed retry keeps the previous complete exports. After a successful YouTube retry, prepare PL/EN captions again in **Lokalizacje YouTube**, review them and approve them. Old caption copies are archived in the recording's `ponow-*` folder. Titles, descriptions and remote YouTube content are unchanged.
+
 ## Optional speaker labels and vocal separation
 
 To add speaker diarization, install its environment by rerunning the main installer without `-WithoutSpeakers`:
@@ -102,13 +110,17 @@ Each recording has its own output folder and unique filenames. Use **Otwórz wyn
 
 | Format | Use |
 | --- | --- |
-| TXT | Readable transcript with times and speaker labels |
+| TXT | Readable transcript with times and optional speaker labels |
 | SRT / VTT | Subtitle cues for players and editors |
 | JSON | Words, segments, speakers, model settings and recovery metadata |
 
 See the [illustrative TXT](examples/demo-transcript.txt) and [SRT](examples/demo-transcript.srt). Automatic text and speaker labels need review, especially for music, overlap or technical vocabulary.
 
-Use **Obróbka transkrypcji** to load existing TXT/SRT/VTT files and preview copies without speaker labels. Saving preserves timestamps and originals, adding a suffix and a version number when needed.
+New TXT, SRT and VTT exports omit speaker labels by default when the only labels are **Mówca 1** and/or **Mówca nieustalony**. If another speaker occurs, all labels remain. Raw segments, words and diarization data retain their speaker labels in JSON. The **Nowe transkrypcje** checkbox in **Obróbka transkrypcji** controls this rule for future queue exports; it does not require another audio/model trial.
+
+Use **Obróbka transkrypcji** to load existing TXT/SRT/VTT files. New copies default to the folder of each source file. Importing files from several folders keeps each copy beside its own source. **Zmień folder** chooses a shared destination that survives subsequent imports; **Obok źródeł** restores the default.
+
+The default copy mode applies the same single-speaker rule to the whole file. Files with other speakers or no labels are reported as unchanged and do not receive redundant copies. Uncheck **Tylko: Mówca 1 / Mówca nieustalony** to remove every supported speaker label. **Zapisz zaznaczone** and **Zapisz wszystkie** write actual files, preserving timestamps, encoding and originals, with unique names. For previously completed recordings, choose **Wszystkie gotowe**, then **Zapisz wszystkie**. This text operation does not rerun Whisper.
 
 The default queue data directory is `%USERPROFILE%\Transkrypcje`, outside the repository. Choose another directory with `KOLEJKA_ROOT` before launching, or with `--root`:
 

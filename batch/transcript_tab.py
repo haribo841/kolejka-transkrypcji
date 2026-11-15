@@ -8,7 +8,7 @@ from tkinter import filedialog, ttk
 
 from .common import job_folder
 from .result_paths import output_paths
-from .transcript_edit import FORMATS, load_transcript, remove_speakers, save_without_speakers
+from .transcript_edit import AUTO_SPEAKER_SETTING, FORMATS, load_transcript, remove_speakers, save_without_speakers
 from .ui_help import Tooltip, help_button, wrap_with_parent
 
 
@@ -27,7 +27,10 @@ class TranscriptTab:
         self.status = tk.StringVar(master=parent, value="Nie dodano plików.")
         self.details = tk.StringVar(master=parent)
         self.remove_labels = tk.BooleanVar(master=parent, value=True)
-        self.destination = tk.StringVar(master=parent, value=str(app.root / "obrobione"))
+        self.single_only = tk.BooleanVar(master=parent, value=True)
+        self.auto_clean_new = tk.BooleanVar(master=parent, value=app.config.get(AUTO_SPEAKER_SETTING, True))
+        self.destination_custom = False
+        self.destination = tk.StringVar(master=parent)
         frame = ttk.Frame(parent, padding=12)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="Obróbka gotowych transkrypcji", font=("Segoe UI", 15, "bold")).pack(anchor="w")
@@ -64,11 +67,18 @@ class TranscriptTab:
         self.operation = ttk.Checkbutton(options, text="Usuń oznaczenia mówców", variable=self.remove_labels, command=self.operation_changed)
         self.operation.pack(side="left", padx=(0, 20))
         Tooltip(self.operation, "Usuwa etykiety takie jak Mówca 1, Mówca nieustalony i Speaker 1 z początku wypowiedzi. Zachowuje czasy i tekst.", self.hint)
+        self.single_option = ttk.Checkbutton(options, text="Tylko: Mówca 1 / Mówca nieustalony", variable=self.single_only, command=self.schedule_preview)
+        self.single_option.pack(side="left", padx=(0, 20))
+        Tooltip(self.single_option, "Sprawdza cały plik. Gdy występuje inny mówca, zachowuje etykiety i pomija zapis identycznej kopii. Odznaczenie usuwa wszystkie obsługiwane etykiety.", self.hint)
         ttk.Label(options, text="Timestampy: zachowaj     Treść wypowiedzi: zachowaj").pack(side="left")
+        self.auto_option = ttk.Checkbutton(frame, text="Nowe transkrypcje: zapisuj bez etykiet, jeśli są tylko Mówca 1 i/lub Mówca nieustalony",
+                                          variable=self.auto_clean_new, command=self.save_auto_option)
+        self.auto_option.pack(anchor="w", pady=(0, 8))
+        Tooltip(self.auto_option, "Dotyczy każdego nowego eksportu TXT, SRT i VTT z kolejki lokalnej i YouTube. Dane mówców pozostają w JSON. Istniejące transkrypcje dodaj do listy i zapisz serię kopii.", self.hint)
         preview = ttk.Panedwindow(frame, orient="horizontal")
         preview.pack(fill="both", expand=True)
         self.original = self.preview_box(preview, "Oryginał")
-        self.edited = self.preview_box(preview, "Podgląd kopii bez mówców")
+        self.edited = self.preview_box(preview, "Podgląd zapisywanej kopii")
         detail = ttk.Label(frame, textvariable=self.details, wraplength=1200)
         detail.pack(anchor="w", fill="x", pady=(6, 4))
         wrap_with_parent(detail, 24)
@@ -79,6 +89,7 @@ class TranscriptTab:
         output.pack(side="left", fill="x", expand=True, padx=(0, 8))
         Tooltip(output, "Kopie otrzymają dopisek _bez_mowcow. Jeśli nazwa jest zajęta, program doda numer i zachowa istniejący plik.", self.hint)
         self.button(destination_row, "Zmień folder", self.choose_folder, "Wybiera folder dla nowych kopii; oryginalne pliki pozostają na miejscu.").pack(side="left")
+        self.button(destination_row, "Obok źródeł", self.use_source_folders, "Przywraca zapis obok każdego pliku źródłowego, także gdy dodano transkrypcje z różnych folderów.").pack(side="left", padx=(6, 0))
         actions = ttk.Frame(frame)
         actions.pack(fill="x", pady=6)
         self.save_selected = self.button(actions, "Zapisz zaznaczone", lambda: self.save(True), "Tworzy kopie bez mówców tylko dla zaznaczonych plików z listy powyżej.")
@@ -131,6 +142,9 @@ class TranscriptTab:
             self.tree.insert("", "end", iid=key, values=(path.name, "Do obróbki", str(path.parent)))
             added += 1
         self.status.set(f"Dodano: {added}. Pliki na liście: {len(self.files)}.")
+        if added:
+            self.last_folder = None
+        self.update_destination()
         if not self.tree.selection() and self.files:
             self.tree.selection_set(next(iter(self.files)))
 
@@ -160,12 +174,14 @@ class TranscriptTab:
                 self.files.pop(key, None)
                 self.tree.delete(key)
             self.status.set(f"Pliki na liście: {len(self.files)}.")
+            self.update_destination()
             self.schedule_preview()
 
     def clear(self):
         if not self.busy:
             self.tree.delete(*self.tree.get_children())
             self.files.clear()
+            self.update_destination()
             self.schedule_preview()
             self.status.set("Lista jest pusta. Pliki na dysku pozostały bez zmian.")
 
@@ -190,12 +206,14 @@ class TranscriptTab:
             return
         try:
             loaded = load_transcript(self.files[selected[0]])
-            result = remove_speakers(loaded.text, loaded.path.suffix)
+            result = remove_speakers(loaded.text, loaded.path.suffix, only_single=self.single_only.get())
             self.set_text(self.original, loaded.text)
             self.set_text(self.edited, result.text if self.remove_labels.get() else loaded.text)
             message = f"{loaded.path.name} | Przedziały czasowe: {result.cues} | Etykiety do usunięcia: {result.removed if self.remove_labels.get() else 0}"
             if result.removed == 0:
-                message += " | Brak obsługiwanych etykiet mówców; kopia będzie identyczna."
+                message += " | Zachowano etykiety: występują inni mówcy." if result.labels else " | Brak etykiet mówców."
+                if self.single_only.get():
+                    message += " Zapis zostanie pominięty."
             self.details.set(message)
         except (ValueError, OSError) as exc:
             self.set_text(self.original, "")
@@ -209,9 +227,34 @@ class TranscriptTab:
         self.schedule_preview()
 
     def choose_folder(self):
-        path = filedialog.askdirectory(parent=self.app.window, title="Folder kopii bez mówców", initialdir=self.app.root)
+        initial = str(self.app.root)
+        if self.destination_custom:
+            initial = self.destination.get()
+        elif self.files:
+            initial = str(next(iter(self.files.values())).parent)
+        path = filedialog.askdirectory(parent=self.app.window, title="Folder kopii bez mówców", initialdir=initial)
         if path:
+            self.destination_custom = True
+            self.last_folder = None
             self.destination.set(path)
+
+    def update_destination(self):
+        if self.destination_custom:
+            return
+        folders = {path.parent for path in self.files.values()}
+        value = "Obok każdego pliku źródłowego" if len(folders) > 1 else ""
+        if len(folders) == 1:
+            value = str(next(iter(folders)))
+        self.destination.set(value)
+
+    def use_source_folders(self):
+        self.destination_custom = False
+        self.last_folder = None
+        self.update_destination()
+
+    def save_auto_option(self):
+        if not self.app.save_setting(AUTO_SPEAKER_SETTING, self.auto_clean_new.get()):
+            self.auto_clean_new.set(self.app.config.get(AUTO_SPEAKER_SETTING, True))
 
     def save(self, selected_only):
         if self.busy or not self.remove_labels.get():
@@ -221,12 +264,15 @@ class TranscriptTab:
             self.status.set("Dodaj pliki i zaznacz je lub użyj Zapisz wszystkie.")
             return
         self.pending = [(key, self.files[key]) for key in ids]
-        self.save_folder = Path(self.destination.get()).resolve()
-        self.total, self.saved, self.failed = len(ids), 0, 0
+        self.save_folder = Path(self.destination.get()).resolve() if self.destination_custom else None
+        self.save_single_only = self.single_only.get()
+        self.total, self.saved, self.failed, self.skipped = len(ids), 0, 0, 0
         self.busy, self.cancel_requested = True, False
         for button in self.buttons:
             button.configure(state="disabled")
         self.operation.configure(state="disabled")
+        self.single_option.configure(state="disabled")
+        self.auto_option.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self.save_after = self.parent.after(1, self.save_next)
 
@@ -237,16 +283,21 @@ class TranscriptTab:
             return
         key, source = self.pending.pop(0)
         try:
-            path, result = save_without_speakers(source, self.save_folder)
-            self.saved += 1
-            self.last_folder = path.parent
-            self.tree.set(key, "status", f"Zapisano; usunięto etykiet: {result.removed}")
-            self.details.set(f"Zapisano: {path}")
+            path, result = save_without_speakers(source, self.save_folder, only_single=self.save_single_only)
+            if path is None:
+                self.skipped += 1
+                self.tree.set(key, "status", "Bez zmian: inni mówcy" if result.labels else "Bez zmian: brak etykiet")
+                self.details.set(f"Pozostawiono bez zmian: {source}")
+            else:
+                self.saved += 1
+                self.last_folder = path.parent
+                self.tree.set(key, "status", f"Zapisano; usunięto etykiet: {result.removed}")
+                self.details.set(f"Zapisano: {path}")
         except (ValueError, OSError) as exc:
             self.failed += 1
             self.tree.set(key, "status", "Błąd: " + str(exc))
             self.details.set(f"{source.name}: {exc}")
-        self.status.set(f"Zapisano: {self.saved}; błędy: {self.failed}; pozostało: {len(self.pending)} z {self.total}.")
+        self.status.set(f"Zapisano: {self.saved}; bez zmian: {self.skipped}; błędy: {self.failed}; pozostało: {len(self.pending)} z {self.total}.")
         # Work on one text file per UI iteration so stopping and closing remain responsive.
         self.save_after = self.parent.after(10, self.save_next)
 
@@ -258,15 +309,26 @@ class TranscriptTab:
         for button in self.buttons:
             button.configure(state="normal")
         self.operation.configure(state="normal")
+        self.single_option.configure(state="normal")
+        self.auto_option.configure(state="normal")
         self.cancel_button.configure(state="disabled")
-        self.status.set(f"{'Zatrzymano' if self.cancel_requested else 'Zakończono'}. Zapisano: {self.saved}; błędy: {self.failed}. Oryginały zachowane.")
+        self.status.set(f"{'Zatrzymano' if self.cancel_requested else 'Zakończono'}. Zapisano: {self.saved}; bez zmian: {self.skipped}; błędy: {self.failed}. Oryginały zachowane.")
         self.pending.clear()
         if self.on_finished:
             callback, self.on_finished = self.on_finished, None
             callback()
 
     def open_folder(self):
-        path = self.last_folder or Path(self.destination.get())
+        selected = self.tree.selection()
+        source = self.files[selected[0]] if selected else next(iter(self.files.values()), None)
+        path = self.last_folder
+        if path is None and self.destination_custom:
+            path = Path(self.destination.get())
+        if path is None and source is not None:
+            path = source.parent
+        if path is None:
+            self.status.set("Najpierw dodaj transkrypcje albo wybierz folder kopii.")
+            return
         if path.is_dir():
             os.startfile(path)
         else:

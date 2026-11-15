@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import os
 from pathlib import Path
 import secrets
+import threading
 import time
 from urllib.parse import parse_qs, urlencode
 import webbrowser
@@ -22,6 +23,10 @@ SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 
 
 class AuthError(RuntimeError):
+    pass
+
+
+class LoginCancelled(AuthError):
     pass
 
 
@@ -125,9 +130,29 @@ def token_request(payload):
         raise AuthError("Nie udało się połączyć z Google. Sprawdź internet i ponów logowanie.") from error
 
 
-def connect(root, *, vault=None, browser=webbrowser.open, timeout=300):
+def check_login_cancelled(cancel):
+    if cancel.is_set():
+        raise LoginCancelled("Anulowano logowanie. Możesz od razu połączyć konto ponownie.")
+
+
+def wait_for_callback(server, callback, cancel, timeout):
+    server.timeout = .25
+    deadline = time.monotonic() + timeout
+    while not callback and time.monotonic() < deadline:
+        check_login_cancelled(cancel)
+        server.handle_request()
+    check_login_cancelled(cancel)
+    if callback.get("error") == "access_denied":
+        raise AuthError("Google odmówił dostępu. Dodaj konto do użytkowników testowych w Google Auth Platform > Odbiorcy, a następnie wybierz Ponów logowanie.")
+    if not callback.get("code") or callback.get("error"):
+        raise AuthError("Logowanie nie zostało zakończone. Wybierz Ponów logowanie. Jeśli przeglądarka pokazuje błąd Google, najpierw popraw wskazane ustawienie projektu.")
+
+
+def connect(root, *, vault=None, browser=webbrowser.open, timeout=300, cancel=None):
     client = client_settings(client_path(root))
     vault = vault or WindowsVault(root)
+    cancel = cancel or threading.Event()
+    check_login_cancelled(cancel)
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
     state, callback = secrets.token_urlsafe(32), {}
@@ -137,7 +162,7 @@ def connect(root, *, vault=None, browser=webbrowser.open, timeout=300):
             query = parse_qs(self.path.partition("?")[2])
             valid = secrets.compare_digest(query.get("state", [""])[0], state)
             if valid:
-                callback.update(code=query.get("code", [""])[0], error=bool(query.get("error")))
+                callback.update(code=query.get("code", [""])[0], error=query.get("error", [""])[0])
             self.send_response(200 if valid else 400)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
@@ -152,17 +177,15 @@ def connect(root, *, vault=None, browser=webbrowser.open, timeout=300):
                   "state": state, "code_challenge": challenge, "code_challenge_method": "S256",
                   "access_type": "offline", "prompt": "consent"}
         params.pop("client_secret")
-        browser(AUTH_URL + "?" + urlencode(params))
-        server.timeout = 1
-        deadline = time.monotonic() + timeout
-        while not callback and time.monotonic() < deadline:
-            server.handle_request()
-    if not callback.get("code") or callback.get("error"):
-        raise AuthError("Logowanie anulowano albo minął czas. Wybierz Połącz ponownie.")
+        if browser(AUTH_URL + "?" + urlencode(params)) is False:
+            raise AuthError("Nie udało się otworzyć przeglądarki. Sprawdź domyślną przeglądarkę i ponów logowanie.")
+        wait_for_callback(server, callback, cancel, timeout)
+    check_login_cancelled(cancel)
     token = token_request({**client, "code": callback["code"], "code_verifier": verifier,
                            "redirect_uri": redirect, "grant_type": "authorization_code"})
     if not token.get("refresh_token"):
         raise AuthError("Nie przyznano dostępu offline. Połącz konto ponownie.")
+    check_login_cancelled(cancel)
     vault.write(token["refresh_token"], client["client_id"])
 
 

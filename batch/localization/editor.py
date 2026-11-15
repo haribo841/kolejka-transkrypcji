@@ -4,13 +4,20 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from ..common import atomic_bytes
+from ..retranscription import pending_request
 from . import directory, place_dialog
 from .captions import parse_srt, render, warnings
 
 
-def save_captions(store, ident, lang, text):
-    cues = parse_srt(text, duration=store.get_video(ident)["duration"])
+def save_captions(store, ident, lang, text, *, expected_revision=None):
+    video = store.get_video(ident)
+    job = store.base.get(video["job_id"])
+    if job["status"] in {"pending", "running"} and pending_request(job):
+        raise ValueError("Trwa ponowna transkrypcja. Poczekaj na zakończenie i przygotuj napisy z nowego wyniku.")
+    cues = parse_srt(text, duration=video["duration"])
     old = store.item(ident, "captions", lang)
+    if expected_revision is not None and old["revision"] != expected_revision:
+        raise ValueError("Napisy zmieniły się od otwarcia edytora. Otwórz je ponownie; stary tekst nie zostanie zapisany na nowej transkrypcji.")
     if old["value"]:
         previous = parse_srt(old["value"])
         before = [(c["id"], round(c["start"] * 1000), round(c["end"] * 1000)) for c in previous]
@@ -25,7 +32,7 @@ def save_captions(store, ident, lang, text):
 
 
 class CaptionEditor:
-    def __init__(self, parent, store, ident, lang, changed):
+    def __init__(self, parent, store, ident, lang, changed, retranscribe=None):
         self.store, self.ident, self.lang, self.changed = store, ident, lang, changed
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Sprawdź napisy " + lang.upper())
@@ -38,14 +45,20 @@ class CaptionEditor:
         self.text.configure(yscrollcommand=scroll.set)
         self.text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        self.text.insert("1.0", store.item(ident, "captions", lang)["value"])
-        self.note = tk.StringVar(master=self.dialog)
+        item = store.item(ident, "captions", lang)
+        self.revision = item["revision"]
+        self.text.insert("1.0", item["value"])
+        self.note = tk.StringVar(master=self.dialog, value=(
+            "Brak przygotowanych napisów. Użyj Przygotuj zaznaczone z włączonymi napisami PL/EN w Lokalizacjach YouTube."
+            if item["review"] == "missing" else ""))
         ttk.Label(self.dialog, textvariable=self.note, wraplength=900).pack(fill="x", padx=12, pady=8)
         row = ttk.Frame(self.dialog)
         row.pack(fill="x", padx=12, pady=(0, 12))
         for label, callback in (("Importuj poprawiony SRT", self.import_file), ("Sprawdź i zapisz", self.save),
                                 ("Zapisz i zatwierdź", lambda: self.save(approve=True)), ("Zamknij", self.dialog.destroy)):
             ttk.Button(row, text=label, command=callback).pack(side="left", padx=(0, 6))
+        if retranscribe is not None:
+            ttk.Button(row, text="Transkrybuj ponownie…", command=lambda: retranscribe(self.dialog)).pack(side="right")
 
     def import_file(self):
         path = filedialog.askopenfilename(parent=self.dialog, filetypes=[("Napisy", "*.srt")])
@@ -61,8 +74,9 @@ class CaptionEditor:
 
     def save(self, approve=False):
         try:
-            notices = save_captions(self.store, self.ident, self.lang, self.text.get("1.0", "end-1c"))
+            notices = save_captions(self.store, self.ident, self.lang, self.text.get("1.0", "end-1c"), expected_revision=self.revision)
             item = self.store.item(self.ident, "captions", self.lang)
+            self.revision = item["revision"]
             if approve:
                 if not item["value"] and not messagebox.askyesno("Brak wypowiedzi", "Potwierdzasz, że materiał nie wymaga napisów?", parent=self.dialog):
                     return

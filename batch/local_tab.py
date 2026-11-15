@@ -174,6 +174,9 @@ class LocalQueueTab:
                 ("transcript", "Otwórz TXT", lambda: app.open_transcript(self.selected()), HELP["transcript"])):
             self.button(recovery, key, text, action, hint).pack(side="left", padx=(0, 6))
         collapsible_help(footer, self.hint)
+        help_button(footer, "Transkrybuj ponownie…", lambda: app.retranscribe(self.selected()),
+                    "Uruchamia Whispera od nowa dla jednego wybranego nagrania, również ukończonego. Zachowuje stare wyniki i audio.",
+                    self.hint).pack(anchor="w", pady=(4, 0))
 
     def open_import_report(self):
         path = self.app.root / LOCAL_IMPORT_REPORT

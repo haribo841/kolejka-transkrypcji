@@ -4,6 +4,8 @@ from pathlib import Path
 from contextlib import nullcontext
 import json
 import os
+import sqlite3
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -19,6 +21,148 @@ from batch.transcript_edit import remove_speakers
 from batch.uvr import archive_source, cached_archive
 from batch.uvr_child import UVR_RATE, generated_vocal, request_paths, separator, write_vocal_block
 from batch.worker import Worker
+from batch.store import Store
+from batch.localization.translation import setup as setup_translation, setup_paths
+
+
+class LocalRegistrySecurityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+
+    def test_uri_devices_and_traversal_are_rejected_before_creating_a_registry(self):
+        invalid = ("file:outside?mode=rwc", "sqlite:///outside", "https://host/db", "a\x00b", "\\\\.\\NUL",
+                   str(self.root / "queue" / ".." / "outside"))
+        with patch("batch.store.sqlite3.connect") as connect:
+            for value in invalid:
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    Store(value)
+        connect.assert_not_called()
+        self.assertFalse((self.root / "outside").exists())
+
+    def test_database_connections_are_literal_filenames_with_uri_mode_disabled(self):
+        store = Store(self.root / "kolejka z polskimi znakami ąę")
+        actual = sqlite3.connect
+        with patch("batch.store.sqlite3.connect", wraps=actual) as connect:
+            with store.connect() as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM jobs").fetchone()[0], 0)
+            store.snapshot()
+        self.assertEqual(connect.call_count, 2)
+        for call in connect.call_args_list:
+            self.assertEqual(call.args[0].name, "kolejka.sqlite3")
+            self.assertFalse(call.kwargs["uri"])
+
+    def test_replacing_database_path_cannot_redirect_writes(self):
+        store = Store(self.root)
+        store.path = "file:outside.sqlite3?mode=rwc"
+        with patch("batch.store.sqlite3.connect") as connect:
+            with self.assertRaises(ValueError):
+                with store.connect():
+                    pass
+            with self.assertRaises(ValueError):
+                store.snapshot()
+        connect.assert_not_called()
+
+    def test_hardlinked_database_is_rejected_before_sqlite_opens_it(self):
+        outside = self.root / "outside.sqlite3"
+        outside.write_bytes(b"preserve unrelated database")
+        queue = self.root / "queue"
+        queue.mkdir()
+        os.link(outside, queue / "kolejka.sqlite3")
+        with patch("batch.store.sqlite3.connect") as connect, self.assertRaises(ValueError):
+            Store(queue)
+        connect.assert_not_called()
+        self.assertEqual(outside.read_bytes(), b"preserve unrelated database")
+
+
+class TranslationSetupSecurityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.queue = self.root / "queue"
+        self.queue.mkdir()
+        self.temp_root = self.root / "os-temp"
+        self.temp_root.mkdir()
+        self.patch = patch("batch.localization.translation.tempfile.gettempdir", return_value=str(self.temp_root))
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def test_output_is_fixed_and_staging_is_derived_inside_os_temporary_directory(self):
+        root, output, staging = setup_paths(self.queue)
+        self.assertEqual(root, self.queue)
+        self.assertEqual(output, self.queue / "modele" / "madlad400-3b-ct2")
+        self.assertTrue(staging.is_relative_to(self.temp_root))
+        self.assertEqual(staging, setup_paths(self.queue)[2])
+        self.assertFalse(output.exists() or staging.exists())
+
+    def test_configured_outside_destination_is_rejected_before_import_or_download(self):
+        outside = self.root / "unrelated"
+        atomic_json(self.queue / "lokalizacje-ustawienia.json", {"translation_model": str(outside)})
+        with patch("batch.localization.translation.check_disk") as disk, self.assertRaises(ValueError):
+            setup_translation(self.queue)
+        disk.assert_not_called()
+        self.assertFalse(outside.exists())
+        self.assertEqual(list(self.temp_root.iterdir()), [])
+
+    def test_model_parent_directory_link_cannot_escape_the_selected_registry(self):
+        outside = self.root / "unrelated"
+        outside.mkdir()
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(outside), str(self.queue / "modele"))
+        else:
+            (self.queue / "modele").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            setup_paths(self.queue)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_arbitrary_staging_cli_argument_is_not_accepted(self):
+        from batch.localization.translation import main
+        with patch.object(sys, "argv", ["translation", "--setup", str(self.queue), "--staging", str(self.root / "outside")]), \
+             patch("batch.localization.translation.setup") as setup, patch("sys.stderr"), self.assertRaises(SystemExit) as error:
+            main()
+        self.assertEqual(error.exception.code, 2)
+        setup.assert_not_called()
+        self.assertFalse((self.root / "outside").exists())
+
+    def test_existing_model_is_not_overwritten_or_reconverted(self):
+        _, output, _ = setup_paths(self.queue)
+        output.mkdir(parents=True)
+        model = output / "model.bin"
+        model.write_bytes(b"keep working model")
+        with self.assertRaisesRegex(RuntimeError, "już istnieje"):
+            setup_translation(self.queue)
+        self.assertEqual(model.read_bytes(), b"keep working model")
+        self.assertEqual(list(self.temp_root.iterdir()), [])
+
+    def test_conversion_uses_a_private_directory_and_never_forces_overwrite(self):
+        module = "batch.localization.translation"
+        def snapshot(_model, **kwargs):
+            source = kwargs["local_dir"]
+            source.mkdir(parents=True)
+            (source / "tokenizer.json").write_text("{}", encoding="utf-8")
+            return str(source)
+        def convert(destination, **kwargs):
+            self.assertFalse(kwargs["force"])
+            target = Path(destination)
+            self.assertTrue(target.parent.is_relative_to(self.queue / "modele"))
+            self.assertEqual(target.name, "converted")
+            self.assertFalse(target.exists())
+            target.mkdir()
+            (target / "model.bin").write_bytes(b"converted model")
+        converter = MagicMock()
+        converter.convert.side_effect = convert
+        dependencies = {"huggingface_hub": SimpleNamespace(snapshot_download=snapshot),
+                        "ctranslate2.converters": SimpleNamespace(TransformersConverter=lambda *_a, **_kw: converter)}
+        with patch.dict(sys.modules, dependencies), patch(module + ".check_disk"), patch(module + ".importlib.metadata.version", return_value="pinned"):
+            setup_translation(self.queue)
+        output = self.queue / "modele" / "madlad400-3b-ct2"
+        self.assertEqual((output / "model.bin").read_bytes(), b"converted model")
+        self.assertTrue((output / "ready.json").is_file())
+        self.assertTrue((output / "tokenizer.json").is_file())
+        self.assertFalse(list(output.parent.glob(".madlad-*")))
 
 
 class SonarConfigurationTests(unittest.TestCase):

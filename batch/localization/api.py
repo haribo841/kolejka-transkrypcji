@@ -152,14 +152,17 @@ def sync_catalog(store, api, ids, progress):
             raise AuthError("Wybierz kanał w kreatorze publikacji.")
         playlist = channel["contentDetails"]["relatedPlaylists"]["uploads"]
         token = ""
+        progress("Zbieranie katalogu filmów wybranego kanału…")
         while True:
             page = api.request("GET", "playlistItems", params={"part": "contentDetails", "playlistId": playlist, "maxResults": 50, "pageToken": token})
             selected.extend(item["contentDetails"]["videoId"] for item in page.get("items", []))
+            progress(f"Znaleziono {len(selected)} filmów w katalogu kanału")
             token = page.get("nextPageToken", "")
             if not token:
                 break
     selected = list(dict.fromkeys(selected))
     for offset in range(0, len(selected), 50):
+        progress(f"Pobieranie metadanych {offset + 1}-{min(offset + 50, len(selected))} / {len(selected)}")
         data = api.videos(selected[offset:offset + 50])
         rows = []
         for item in data:
@@ -177,5 +180,6 @@ def sync_catalog(store, api, ids, progress):
     if ids:
         from ..common import atomic_json
         from . import directory
-        for ident in ids:
+        for index, ident in enumerate(ids, start=1):
+            progress(f"Sprawdzanie napisów filmu {index} / {len(ids)}")
             atomic_json(directory(store.root, ident) / "youtube-captions.json", api.captions(ident))

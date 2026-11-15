@@ -192,6 +192,21 @@ class LocalizationStore:
         with self.base.connect() as db:
             db.execute("UPDATE ytl_items SET review='review',approval_hash='',updated=? WHERE video_id=? AND kind=? AND lang=?", (now(), ident, kind, lang))
 
+    def invalidate_captions(self, ident, retry_id):
+        """Keep remote IDs for later replacement; new ASR requires fresh review."""
+        marker = "asr-retry:" + retry_id
+        with self.base.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for old in db.execute("SELECT * FROM ytl_items WHERE video_id=? AND kind='captions'", (ident,)).fetchall():
+                if old["source_hash"] == marker:
+                    continue
+                if old["content_hash"]:
+                    db.execute("INSERT INTO ytl_history(video_id,kind,lang,revision,value,source_hash,content_hash,review,created) VALUES(?,?,?,?,?,?,?,?,?)",
+                               (ident, "captions", old["lang"], old["revision"], old["value"], old["source_hash"], old["content_hash"], old["review"], now()))
+                db.execute("UPDATE ytl_items SET value='',source_hash=?,artifact_path='',content_hash='',revision=revision+1,"
+                           "review='missing',approval_hash='',publication='none',error='',updated=? WHERE video_id=? AND kind='captions' AND lang=?",
+                           (marker, now(), ident, old["lang"]))
+
     def mark(self, ident, kind, lang, state, checksum, remote_id="", error=""):
         with self.base.connect() as db:
             db.execute("UPDATE ytl_items SET publication=?,published_hash=?,remote_id=?,error=?,updated=? WHERE video_id=? AND kind=? AND lang=? AND content_hash=?", (state, checksum if state in {"verified", "manual"} else "", remote_id, error, now(), ident, kind, lang, checksum))

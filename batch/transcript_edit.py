@@ -12,10 +12,12 @@ FORMATS = {".txt", ".srt", ".vtt"}
 TIME = r"(?:\d+:)?\d{2}:\d{2}(?:[.,]\d{1,3})?"
 TXT_TIME = re.compile(r"^(?P<time>[ \t]*\[" + TIME + r"(?:[ \t]*-[ \t]*" + TIME + r")?\])")
 SUBTITLE_TIME = re.compile(r"^[ \t]*" + TIME + r"[ \t]+-->[ \t]+" + TIME)
-SPEAKER = re.compile(r"^(?P<indent>[ \t]*(?:-[ \t]*)?)(?:M[oó]wca[ \t]+(?:\d+|nieustalony)|"
+SPEAKER = re.compile(r"^(?P<indent>[ \t]*(?:-[ \t]*)?)(?P<label>M[oó]wca[ \t]+(?:\d+|nieustalony)|"
                      r"Speaker[ _-]*\d+|Unknown[ \t]+speaker)[ \t]*:[ \t]*", re.IGNORECASE)
-VOICE = re.compile(r"<v(?:\.[^\s.>]+)*+[ \t]++[^>\r\n]++>", re.IGNORECASE)
+VOICE = re.compile(r"<v(?:\.[^\s.>]+)*+[ \t]++(?P<label>[^>\r\n]++)>", re.IGNORECASE)
 VOICE_END = re.compile(r"</v[ \t]*>", re.IGNORECASE)
+SINGLE_SPEAKER = re.compile(r"M[oó]wca[ \t]+(?:0*1|nieustalony)\Z", re.IGNORECASE)
+AUTO_SPEAKER_SETTING = "omit_single_speaker_labels"
 
 
 @dataclass
@@ -34,6 +36,12 @@ class EditedTranscript:
     text: str
     removed: int
     cues: int
+    labels: tuple[str, ...] = ()
+
+
+def single_speaker_labels(labels):
+    values = [str(label).strip() for label in labels]
+    return bool(values) and all(SINGLE_SPEAKER.fullmatch(value) for value in values)
 
 
 def load_transcript(path):
@@ -56,29 +64,33 @@ def load_transcript(path):
     return Transcript(path, text, encoding, bom)
 
 
-def speaker_payload(payload, eligible=True):
+def speaker_payload(payload, eligible=True, labels=None):
     match = SPEAKER.match(payload) if eligible else None
     if match:
+        if labels is not None:
+            labels.add(match["label"].strip())
         return match["indent"] + payload[match.end():], 1
     return payload, 0
 
 
 def remove_txt_speakers(text):
     lines, removed, cues = [], 0, 0
+    labels = set()
     for line in text.splitlines(keepends=True):
         match = TXT_TIME.match(line)
         if match is None:
             lines.append(line)
             continue
-        payload, count = speaker_payload(line[match.end():])
+        payload, count = speaker_payload(line[match.end():], labels=labels)
         lines.append(line[:match.end()] + payload)
         removed += count
         cues += 1
-    return EditedTranscript("".join(lines), removed, cues)
+    return EditedTranscript("".join(lines), removed, cues, tuple(sorted(labels)))
 
 
 def remove_subtitle_speakers(text, extension):
     lines, removed, cues = [], 0, 0
+    labels = set()
     in_cue = False
     first_payload = False
     for line in text.splitlines(keepends=True):
@@ -93,30 +105,35 @@ def remove_subtitle_speakers(text, extension):
         if not in_cue:
             lines.append(line)
             continue
-        payload, count = speaker_payload(line, first_payload or line.lstrip(" \t").startswith("-"))
-        first_payload = False
-        removed += count
+        payload = line
         if extension == ".vtt":
+            labels.update(match["label"].strip() for match in VOICE.finditer(payload))
             payload, count = VOICE.subn("", payload)
             removed += count
             # A voice span can close on a later line within the same cue.
             payload = VOICE_END.sub("", payload)
+        payload, count = speaker_payload(payload, first_payload or payload.lstrip(" \t").startswith("-"), labels)
+        first_payload = False
+        removed += count
         lines.append(payload)
-    return EditedTranscript("".join(lines), removed, cues)
+    return EditedTranscript("".join(lines), removed, cues, tuple(sorted(labels)))
 
 
-def remove_speakers(text, extension):
+def remove_speakers(text, extension, *, only_single=False):
     extension = extension.lower()
     if extension not in FORMATS:
         raise ValueError("Obsługiwane formaty to TXT, SRT i VTT.")
-    if extension == ".txt":
-        return remove_txt_speakers(text)
-    return remove_subtitle_speakers(text, extension)
+    result = remove_txt_speakers(text) if extension == ".txt" else remove_subtitle_speakers(text, extension)
+    if only_single and not single_speaker_labels(result.labels):
+        return EditedTranscript(text, 0, result.cues, result.labels)
+    return result
 
 
-def save_without_speakers(source, output_dir=None):
+def save_without_speakers(source, output_dir=None, *, only_single=False):
     loaded = load_transcript(source)
-    edited = remove_speakers(loaded.text, loaded.path.suffix)
+    edited = remove_speakers(loaded.text, loaded.path.suffix, only_single=only_single)
+    if only_single and not edited.removed:
+        return None, edited
     destination = Path(output_dir) if output_dir else loaded.path.parent
     stem = loaded.path.stem
     if stem.casefold() in {"transkrypcja", "transkrybcja", "transcript"}:

@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from .paths import output_file
+from .paths import child_path, local_path, output_file
 import sqlite3
 
 from .common import job_folder, slug
@@ -142,9 +142,9 @@ def validate_output_change(job, folder):
 class Store:
     def __init__(self, root, *, timeout=30):
         self.timeout = timeout
-        self.root = Path(root)
+        self.root = local_path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.path = self.root / "kolejka.sqlite3"
+        self.path = self.database_path()
         with self.connect() as db:
             db.executescript('''
                 PRAGMA journal_mode=WAL;
@@ -192,14 +192,28 @@ class Store:
                 db.execute("ALTER TABLE jobs ADD COLUMN output_root TEXT")
             for name, definition in (("processed_until", "REAL NOT NULL DEFAULT 0"),
                                      ("error_code", "TEXT NOT NULL DEFAULT ''"),
-                                     ("error_history", "TEXT NOT NULL DEFAULT '[]'")):
+                                     ("error_history", "TEXT NOT NULL DEFAULT '[]'"),
+                                     ("retry_request", "TEXT NOT NULL DEFAULT '{}'")):
                 if name not in job_columns:
                     db.execute("ALTER TABLE jobs ADD COLUMN " + name + " " + definition)
             db.execute("UPDATE jobs SET stage='Oczekuje na wznowienie' WHERE status='pending' AND stage='Wymaga działania'")
 
+    def database_path(self):
+        # Validate the unresolved leaf first: resolving it before output_file
+        # would hide a symlink to another database inside this same directory.
+        path = output_file(self.root / "kolejka.sqlite3", suffix=".sqlite3")
+        if path.exists() and path.stat().st_nlink > 1:
+            raise ValueError("Baza kolejki nie może być dowiązaniem do innego pliku.")
+        if path != child_path(self.root, "kolejka.sqlite3"):
+            raise ValueError("Baza musi znajdować się w katalogu kolejki.")
+        return path
+
     @contextmanager
     def connect(self, *, timeout=None):
-        connection = sqlite3.connect(self.path, timeout=self.timeout if timeout is None else timeout)
+        path = self.database_path()
+        if self.path != path:
+            raise ValueError("Nie można zmienić ścieżki bazy przez ciąg połączenia.")
+        connection = sqlite3.connect(path, timeout=self.timeout if timeout is None else timeout, uri=False)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA foreign_keys=ON")
@@ -211,7 +225,10 @@ class Store:
 
     def snapshot(self, *, timeout=0.05):
         """Read the table and session from one bounded, read-only transaction."""
-        connection = sqlite3.connect(self.path, timeout=timeout)
+        path = self.database_path()
+        if self.path != path:
+            raise ValueError("Nie można zmienić ścieżki bazy przez ciąg połączenia.")
+        connection = sqlite3.connect(path, timeout=timeout, uri=False)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA query_only=ON")
@@ -263,7 +280,7 @@ class Store:
             return dict(row) if row else None
 
     def update(self, job_id, **values):
-        allowed = {"stage", "progress", "error", "status", "duration", "attempts", "processed_until", "error_code", "error_history"}
+        allowed = {"stage", "progress", "error", "status", "duration", "attempts", "processed_until", "error_code", "error_history", "retry_request"}
         if not values.keys() <= allowed:
             raise ValueError("Niepoprawne pola aktualizacji zadania.")
         values["updated"] = now()
@@ -345,6 +362,21 @@ class Store:
                 query += " AND id IN (" + ",".join("?" for _ in ids) + ")"
                 args.extend(ids)
             return db.execute(query, args).rowcount
+
+    def request_retranscription(self, job_id, request):
+        """Explicitly requeue even a completed job; normal Start never does this."""
+        from .retranscription import validate_request
+        validate_request(request)
+        if request["state"] != "requested":
+            raise ValueError("Wymagane jest nowe zlecenie transkrypcji.")
+        with self.connect() as db:
+            db.execute(BEGIN_WRITE)
+            job = db.execute(SELECT_JOB, (job_id,)).fetchone()
+            if job is None or job["status"] in {"running", "draft", "skipped"}:
+                raise ValueError("Wybierz jedno nagranie audio lub wideo, które obecnie nie pracuje.")
+            db.execute("UPDATE jobs SET retry_request=?,status='pending',enabled=1,stage='Oczekuje na nową transkrypcję',"
+                       "progress=0,processed_until=0,error='',error_code='',updated=? WHERE id=?",
+                       (json.dumps(request, ensure_ascii=False), now(), job_id))
 
     def record_failure(self, job_id, message, code, *, partial=False, processed_until=0):
         job = self.get(job_id)

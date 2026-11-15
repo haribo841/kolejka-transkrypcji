@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 
 from .paths import child_path, input_file, local_path, output_file, within_root
 
@@ -66,6 +65,7 @@ def defaults():
         "asr_seconds": 600, "asr_context": 5,
         "diar_seconds": 1800, "diar_context": 10,
         "min_free_gb": 2, "diarization": True,
+        "omit_single_speaker_labels": True,
         "language": "auto", "audio_track": 0,
         "device": "CPU", "hotwords": "",
         "uvr_enabled": False, "keep_audio": False,

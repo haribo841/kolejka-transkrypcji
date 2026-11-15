@@ -9,9 +9,10 @@ import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 
 from ..common import atomic_json, check_disk, digest, read_json, signature
-from ..paths import child_path
+from ..paths import child_path, local_path, within_root
 from . import options
 
 MODEL = "google/madlad400-3b-mt"
@@ -19,22 +20,35 @@ REVISION = "fa184c675da0b5c9e1c8694fccd4e12e2d422094"
 STATE_FILE = "lokalizacje-model.json"
 
 
-def setup(root, staging):
+def setup_paths(root):
+    """Only application-owned children can receive downloads and conversions."""
+    root = local_path(root)
+    models = child_path(root, "modele")
+    output = child_path(models, "madlad400-3b-ct2")
+    configured = local_path(options(root)["translation_model"])
+    if configured != output:
+        raise ValueError("Konwersja zapisuje model wyłącznie w modele/madlad400-3b-ct2 wybranej kolejki. Użyj tego miejsca w konfiguracji.")
+    staging = child_path(local_path(tempfile.gettempdir()), "kolejka-madlad-" + signature(str(root))[:12])
+    return root, output, staging
+
+
+def setup(root):
+    root, output, staging = setup_paths(root)
+    if output.exists():
+        raise RuntimeError("Model docelowy już istnieje. Zachowano poprzedni model.")
     from huggingface_hub import snapshot_download
     from ctranslate2.converters import TransformersConverter
-    config = options(root)
-    output = Path(config["translation_model"])
     output.parent.mkdir(parents=True, exist_ok=True)
     check_disk(output.parent, 4 * 1024 ** 3)
-    staging = Path(staging)
     staging.mkdir(parents=True, exist_ok=True)
     check_disk(staging, 16 * 1024 ** 3)
-    atomic_json(Path(root) / STATE_FILE, {"state": "running", "message": "Pobieranie MADLAD-400 3B. Konwersja INT8 nastąpi po pobraniu."})
-    source = snapshot_download(MODEL, revision="fa184c675da0b5c9e1c8694fccd4e12e2d422094", local_dir=staging / "source",
+    atomic_json(child_path(root, STATE_FILE), {"state": "running", "message": "Pobieranie MADLAD-400 3B. Konwersja INT8 nastąpi po pobraniu."})
+    source = snapshot_download(MODEL, revision="fa184c675da0b5c9e1c8694fccd4e12e2d422094", local_dir=child_path(staging, "source"),
                                allow_patterns=["*.json", "*.model", "*.safetensors"])
-    temporary = output.with_name(output.name + ".preparing")
+    conversion = within_root(tempfile.mkdtemp(prefix=".madlad-", dir=output.parent), output.parent)
+    temporary = child_path(conversion, "converted")
     converter = TransformersConverter(source, load_as_float16=True)
-    converter.convert(str(temporary), quantization="int8", force=True)
+    converter.convert(str(temporary), quantization="int8", force=False)
     for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "added_tokens.json", "spiece.model"):
         candidate = Path(source) / name
         if candidate.is_file():
@@ -43,9 +57,13 @@ def setup(root, staging):
     versions = {name: importlib.metadata.version(name) for name in ("ctranslate2", "transformers", "sentencepiece")}
     atomic_json(temporary / "ready.json", {"model": MODEL, "revision": REVISION, "quantization": "int8", "device": "cpu", "files": files, "versions": versions})
     if output.exists():
-        raise RuntimeError("Model docelowy już istnieje. Zachowano poprzedni model i nową konwersję .preparing.")
-    os.replace(temporary, output)
-    atomic_json(Path(root) / STATE_FILE, {"state": "ready", "message": "Model tłumaczeń gotowy do próby.", "revision": REVISION, "versions": versions})
+        raise RuntimeError("Model docelowy już istnieje. Zachowano poprzedni model i nową konwersję: " + str(conversion))
+    output = child_path(child_path(root, "modele"), "madlad400-3b-ct2")
+    conversion = within_root(conversion, output.parent)
+    temporary = child_path(conversion, "converted")
+    os.rename(temporary, output)
+    conversion.rmdir()
+    atomic_json(child_path(root, STATE_FILE), {"state": "ready", "message": "Model tłumaczeń gotowy do próby.", "revision": REVISION, "versions": versions})
 
 
 def ready(root):
@@ -176,22 +194,19 @@ def run_request(path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--setup", type=Path)
-    parser.add_argument("--staging", type=Path)
+    parser.add_argument("--setup", type=local_path)
     parser.add_argument("request", nargs="?", type=Path)
     args = parser.parse_args()
     os.environ.update(HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1", TOKENIZERS_PARALLELISM="false")
     try:
         if args.setup:
-            if not args.staging:
-                raise ValueError("Wskaż folder roboczy konwersji.")
-            setup(args.setup, args.staging)
+            setup(args.setup)
         else:
             os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
             run_request(args.request)
     except Exception as error:
         if args.setup:
-            atomic_json(args.setup / STATE_FILE, {"state": "error", "message": str(error)[:1000]})
+            atomic_json(child_path(args.setup, STATE_FILE), {"state": "error", "message": str(error)[:1000]})
         raise
 
 

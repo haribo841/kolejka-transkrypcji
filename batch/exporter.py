@@ -7,6 +7,7 @@ from pathlib import Path
 from .common import atomic_new_bytes, atomic_json, digest, read_json, timestamp
 from .result_paths import (EXTENSIONS, LEGACY_OUTPUTS, assert_output_owner, output_paths,
                            output_stem, unused_paths)
+from .transcript_edit import AUTO_SPEAKER_SETTING, single_speaker_labels
 
 OUTPUTS = LEGACY_OUTPUTS
 
@@ -76,6 +77,10 @@ def export(folder, report, execution_signature, *, complete=True):
     segments = report["segments"]
     validate_segments(segments, duration)
     report["complete"] = complete
+    labels = {segment["speaker"] for segment in segments}
+    automatic = (report.get("settings") or {}).get(AUTO_SPEAKER_SETTING, True)
+    omit_labels = bool(automatic and single_speaker_labels(labels))
+    report["text_export"] = {"omit_single_speaker_labels": bool(automatic), "speaker_labels_omitted": omit_labels}
     lines = [f"{report['title']}\n"]
     srt, vtt = [], ["WEBVTT\n\n"]
     notice = recovered_notice(report) if complete else partial_notice(report, duration)
@@ -86,15 +91,15 @@ def export(folder, report, execution_signature, *, complete=True):
     for segment in segments:
         start, end = segment["start"], segment["end"]
         text = segment["text"].replace("\r", " ").replace("\n", " ").strip()
-        label = segment["speaker"]
-        lines.append(f"[{timestamp(start)} - {timestamp(end)}] {label}: {text}\n")
+        prefix = "" if omit_labels else f"{segment['speaker']}: "
+        lines.append(f"[{timestamp(start)} - {timestamp(end)}] {prefix}{text}\n")
         if round(end * 1000) <= round(start * 1000) or not text:
             continue
         cue_number += 1
         # Escape markup characters so speech remains literal subtitle text.
         escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        srt.append(f"{cue_number}\n{timestamp(start, ',')} --> {timestamp(end, ',')}\n{label}: {escaped}\n\n")
-        vtt.append(f"{timestamp(start)} --> {timestamp(end)}\n{label}: {escaped}\n\n")
+        srt.append(f"{cue_number}\n{timestamp(start, ',')} --> {timestamp(end, ',')}\n{prefix}{escaped}\n\n")
+        vtt.append(f"{timestamp(start)} --> {timestamp(end)}\n{prefix}{escaped}\n\n")
     if not segments:
         lines.append("[Brak rozpoznanych wypowiedzi]\n")
     content = dict(zip(EXTENSIONS, ("".join(lines), "".join(srt), "".join(vtt),

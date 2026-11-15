@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.metadata
 import json
 import logging
 import os
@@ -8,12 +7,11 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
-import sys
 import threading
 import time
 
 from .asr import ASR
-from .common import (APP, NO_WINDOW, ResourceError, WorkerLock, application_python, atomic_json, check_disk,
+from .common import (APP, NO_WINDOW, ResourceError, WorkerLock, application_python, check_disk,
                      digest, job_folder, read_json, remove_work_file, settings, signature,
                      windows_sleep_guard)
 from .diarization import run_diarization, validate_diarization
@@ -21,6 +19,8 @@ from .exporter import export, verify_outputs
 from .result_paths import assert_output_owner, reserve_output
 from .media import EmptyAudio, MediaError, decode, download, media_metadata
 from .output_fallback import ensure_output
+from .retranscription import (attempt_work, invalidate_captions, pending_request, previous_results,
+                             retry_config, retry_input, validate_request)
 from .outcomes import permanent_audio_failure
 from .speakers import assign_words, cues_from_words, merge_speakers
 from .store import Store, in_scope, now, scope_kind
@@ -108,6 +108,10 @@ class Worker:
             self.store.update(self.current["id"], stage=stage, progress=float(percent))
 
     def process(self, job):
+        request = pending_request(job)
+        if request:
+            self.process_retry(job, request)
+            return
         config = self.config
         source = self.local_source(job) if job["kind"] == "local" else None
         folder = ensure_output(self.store, job)
@@ -134,19 +138,68 @@ class Worker:
         except EmptyAudio as exc:
             self.finish_empty(job, source, folder, work, execution, exc)
 
-    def process_audio(self, job, source, folder, work, execution):
+    def process_retry(self, job, request):
+        """One explicit attempt, resumable within its own fresh checkpoint set."""
+        config, asr = self.config, self.asr
+        localization_lock = WorkerLock(self.root / "lokalizacje")
+        try:
+            if not localization_lock.acquire():
+                raise ResourceError("Lokalizacje YouTube pracują. Zatrzymaj sesję przed ponowną transkrypcją.")
+            if WorkerLock.busy(self.root / "lokalizacje" / "uruchamianie"):
+                raise ResourceError("Trwa uruchamianie lokalizacji. Poczekaj na zakończenie sesji.")
+            self.config = retry_config(config, request)
+            self.asr = ASR(self.config, self.root)
+            preflight(self.config, self.root, kind=job["kind"] if request["input"] == "source" else "local")
+            folder = ensure_output(self.store, job)
+            reserve_output(folder, job["identity"])
+            check_disk(folder, reserve_gb=self.config["min_free_gb"])
+            work = attempt_work(folder, request)
+            manifest, previous = previous_results(folder, work, job["identity"])
+            execution = signature({"identity": job["identity"], "retry": request, "config": self.config})
+            if not verify_outputs(folder, job["identity"], execution):
+                self.retry_audio(job, request, folder, work, execution, manifest, previous)
+            if verify_outputs(folder, job["identity"], execution):
+                invalidate_captions(self.root, job, request, work)
+                current = read_json(folder / "gotowe.json", {})
+                warning = current.get("terminal_reason") or {}
+                self.store.update(job["id"], status="done", stage="Gotowe: nowa transkrypcja", progress=100,
+                                  processed_until=current["processed_until"], error=warning.get("message", ""),
+                                  error_code=warning.get("code", ""), retry_request=json.dumps({**request, "state": "completed"}))
+        finally:
+            self.config, self.asr = config, asr
+            localization_lock.close()
+
+    def retry_audio(self, job, request, folder, work, execution, manifest, previous):
+        self.progress("Przygotowanie nowej transkrypcji", 0)
+        source = retry_input(self.root, job, request, manifest)
+        track = 0
+        if source is None:
+            track = job["audio_track"]
+            source = (self.local_source(job) if job["kind"] == "local" else
+                      download(job, work, self.config, self.progress, youtube_preferences(self.root)))
+        prepared = {"retained": list(manifest.get("audio_files", {})), "track": track,
+                    "uvr": previous.get("uvr") if request["input"] == "vocal" else None}
+        retry_job = {**job, "language": request["language"]}
+        try:
+            self.process_audio(retry_job, source, folder, work, execution, prepared=prepared)
+        except EmptyAudio as exc:
+            self.finish_empty(retry_job, source, folder, work, execution, exc, retained=prepared["retained"])
+
+    def process_audio(self, job, source, folder, work, execution, *, prepared=None):
         config = self.config
-        self.validate_audio(job, source)
-        retained, uvr_report = [], None
-        if config.get("keep_audio") or config.get("uvr_enabled"):
+        track = job["audio_track"] if prepared is None else prepared["track"]
+        self.validate_audio({**job, "audio_track": track}, source)
+        retained = [] if prepared is None else prepared["retained"]
+        uvr_report = None if prepared is None else prepared["uvr"]
+        if prepared is None and (config.get("keep_audio") or config.get("uvr_enabled")):
             self.progress("Zachowywanie źródłowej ścieżki audio", 0)
             archived = archive_source(source, folder, job["audio_track"], config)
             retained.append(str(archived.relative_to(folder)))
-        if config.get("uvr_enabled"):
+        if prepared is None and config.get("uvr_enabled"):
             source, uvr_report = separate(source, work, folder, job["audio_track"], config, self.progress,
                                           recovery_only=job.get("processed_until", 0) > 0)
             retained.append(str(source.relative_to(folder)))
-        pcm, duration, pcm_key = decode(source, work, config, 0 if config.get("uvr_enabled") else job["audio_track"], self.progress)
+        pcm, duration, pcm_key = decode(source, work, config, 0 if config.get("uvr_enabled") else track, self.progress)
         full_duration, complete, recovery = audio_completion(work, duration, uvr_report)
         self.store.update(job["id"], duration=full_duration)
         asr = self.asr.run(pcm, duration, pcm_key, job, work, self.progress)
@@ -180,9 +233,9 @@ class Worker:
         if complete and not words and not recovery:
             self.store.update(job["id"], stage="Gotowe: brak wypowiedzi")
 
-    def finish_empty(self, job, source, folder, work, execution, empty):
+    def finish_empty(self, job, source, folder, work, execution, empty, *, retained=None):
         duration = empty.duration or job.get("duration") or 0.0
-        retained = []
+        retained = [] if retained is None else retained
         if empty.reason != "no_audio_stream" and (self.config.get("keep_audio") or self.config.get("uvr_enabled")):
             archived = archive_source(source, folder, job["audio_track"], self.config)
             retained.append(str(archived.relative_to(folder)))
@@ -209,6 +262,9 @@ class Worker:
         return source
 
     def finish(self, job, folder, work, report, execution, complete):
+        request = pending_request(job)
+        if request:
+            report["retranscription"] = request
         duration, full_duration = report["processed_until"], report["duration"]
         self.progress("Atomowy zapis i sprawdzanie TXT, SRT, VTT, JSON", 0)
         if not complete:
@@ -227,8 +283,9 @@ class Worker:
             report.update(source_complete=False, coverage_unknown=True, retry_recommended=False,
                           preserve_work=True, terminal_reason=warning)
         export(folder, report, execution)
-        self.store.update(job["id"], status="done", stage="Gotowe: odzyskane audio" if warning else "Gotowe", progress=100,
-                          error=warning.get("message", ""), error_code=warning.get("code", ""), processed_until=duration)
+        self.store.update(job["id"], status="running" if request else "done",
+                          stage="Aktualizacja napisów po nowej transkrypcji" if request else ("Gotowe: odzyskane audio" if warning else "Gotowe"),
+                          progress=100, error=warning.get("message", ""), error_code=warning.get("code", ""), processed_until=duration)
         try:
             cleanup(work, job)
         except OSError as exc:
@@ -321,7 +378,7 @@ class Worker:
             self.current = None
 
     def skip_unreadable(self, job, error, code):
-        if job["kind"] != "local" or not permanent_audio_failure(error, code):
+        if pending_request(job) or job["kind"] != "local" or not permanent_audio_failure(error, code):
             return False
         # A replaced/moved source is recoverable by reimport and must not be
         # dismissed using the diagnosis from a different file version.
@@ -360,7 +417,9 @@ class Worker:
             self.store.recover()
             scope = self.store.control()
             if check:
-                preflight(self.config, self.root, kind=scope["scope_kind"])
+                pending = [job for job in self.store.jobs() if in_scope(job, scope) and job["status"] == "pending"]
+                if not pending or any(not pending_request(job) for job in pending):
+                    preflight(self.config, self.root, kind=scope["scope_kind"])
             # Retry only cleanup of verified completed jobs, never inference.
             self.cleanup_completed(scope)
             thread.start()
@@ -406,7 +465,7 @@ def wait_for_launch(root, timeout=10):
         time.sleep(.02)
 
 
-def launch(root, *, kind="all", job_ids=None, order_ids=None, scope_mode="legacy"):
+def launch(root, *, kind="all", job_ids=None, order_ids=None, scope_mode="legacy", retry_request=None):
     root = Path(root).resolve()
     kind = scope_kind(kind)
     launch_lock = WorkerLock(root / "uruchamianie")
@@ -420,6 +479,16 @@ def launch(root, *, kind="all", job_ids=None, order_ids=None, scope_mode="legacy
         if not worker_lock.acquire():
             raise ResourceError("Kolejka już pracuje. Dokończ bieżące nagranie i zatrzymaj ją przed zmianą rodzaju lub zakresu.")
         store = Store(root)
+        if retry_request is not None:
+            validate_request(retry_request)
+            if not job_ids or len(job_ids) != 1 or scope_mode != "selected" or list(order_ids or []) != list(job_ids):
+                raise ValueError("Ponowna transkrypcja obejmuje dokładnie jedno zaznaczone nagranie.")
+            if any(WorkerLock.busy(root / name) for name in ("konfiguracja", "lokalizacje", "lokalizacje/uruchamianie")):
+                raise ResourceError("Zatrzymaj konfigurację i sesję lokalizacji przed ponowną transkrypcją.")
+            selected = store.get(job_ids[0])
+            if selected is None or selected["kind"] != kind:
+                raise ValueError("Nagranie nie należy do wybranej kolejki.")
+            store.request_retranscription(job_ids[0], retry_request)
         store.start(kind=kind, job_ids=job_ids, order_ids=order_ids, scope_mode=scope_mode)
         started = True
         log_path = root / "worker.log"

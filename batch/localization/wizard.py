@@ -5,13 +5,12 @@ from pathlib import Path
 import queue
 import shutil
 import subprocess
-import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
 import webbrowser
 
-from ..common import APP, NO_WINDOW, WorkerLock, atomic_json, read_json, signature
+from ..common import APP, NO_WINDOW, WorkerLock, atomic_json, read_json
 from ..processes import ChildGuard
 from . import options, place_dialog
 from .api import YouTube
@@ -46,6 +45,7 @@ class LocalizationWizard:
         status = connection_status(app.root)
         self.app, self.step, self.closed, self.busy, self.complete = app, status.step if not status.ready else 3, False, False, False
         self.selected_id = selected_id
+        self.operation, self.login_cancel, self.retry_login = "", None, False
         self.events, self.channel_data = queue.Queue(), []
         self.dialog = tk.Toplevel(app.window)
         self.dialog.title("Lokalizacje YouTube: konfiguracja krok po kroku")
@@ -92,11 +92,16 @@ class LocalizationWizard:
                    ("Zainstaluj lub sprawdź środowisko", self.install), ("Pobierz i sprawdź model", self.model),
                    ("Wykonaj próbę lokalną", self.test), ("Pobierz i sprawdź tytuł oraz opis", self.check_metadata)]
         label, action = actions[self.step]
-        ttk.Button(self.body, text=label, command=action).pack(anchor="w", pady=4)
+        self.action_label = label
+        self.action_button = ttk.Button(self.body, text=label, command=action)
+        self.action_button.pack(anchor="w", pady=4)
+        self.cancel_button = None
         if self.step == 0:
             ttk.Button(self.body, text="Wybierz pobrany JSON klienta Desktop", command=self.choose_client).pack(anchor="w", pady=4)
             self.complete = client_path(self.app.root).is_file()
         if self.step == 1:
+            self.cancel_button = ttk.Button(self.body, text="Anuluj oczekiwanie na logowanie", command=self.cancel_login)
+            self.cancel_button.pack(anchor="w", pady=4)
             try:
                 client = client_settings(client_path(self.app.root))
                 WindowsVault(self.app.root).read(client["client_id"])
@@ -139,7 +144,6 @@ class LocalizationWizard:
             try:
                 video = self.sample_video()
                 self.show_metadata(video)
-                self.complete = bool(metadata_source(video))
             except ValueError as error:
                 self.message.set(str(error))
         self.update_navigation()
@@ -150,12 +154,20 @@ class LocalizationWizard:
         self.next.state(["!disabled"] if self.complete and not self.busy else ["disabled"])
         self.back.state(["disabled"] if self.busy or self.step == 0 else ["!disabled"])
         self.skip.state(["disabled"] if self.busy or self.step >= 3 else ["!disabled"])
+        logging_in = self.busy and self.operation == "connect"
+        self.action_button.configure(text="Ponów logowanie" if logging_in else self.action_label)
+        self.action_button.state(["disabled"] if self.busy and not logging_in else ["!disabled"])
+        if self.cancel_button is not None:
+            self.cancel_button.state(["!disabled"] if logging_in else ["disabled"])
 
-    def perform(self, function, callback=None):
+    def perform(self, function, callback=None, *, operation=""):
         if self.busy:
+            self.message.set("Czynność nadal trwa. Przy logowaniu możesz wybrać Ponów logowanie lub Anuluj oczekiwanie.")
             return
         self.busy = True
-        self.message.set("Trwa wykonywanie kroku. Poczekaj na potwierdzenie zakończenia.")
+        self.operation = operation
+        message = "Oczekiwanie na decyzję w przeglądarce. Jeśli Google odrzuci logowanie, popraw ustawienia i kliknij Ponów logowanie tutaj."
+        self.message.set(message if operation == "connect" else "Trwa wykonywanie kroku. Poczekaj na potwierdzenie zakończenia.")
         self.update_navigation()
         def run():
             try:
@@ -170,10 +182,16 @@ class LocalizationWizard:
         try:
             callback, result, error = self.events.get_nowait()
             self.busy = False
-            self.complete = error is None
-            self.message.set(error or "Krok zakończony. Możesz przejść dalej.")
-            if callback and not error:
-                callback(result)
+            finished = self.operation
+            self.operation = ""
+            if finished == "connect" and self.retry_login:
+                self.retry_login = False
+                self.connect()
+            else:
+                self.complete = error is None
+                self.message.set(error or "Krok zakończony. Możesz przejść dalej.")
+                if callback and not error:
+                    callback(result)
             self.update_navigation()
         except queue.Empty:
             pass
@@ -185,7 +203,20 @@ class LocalizationWizard:
             self.perform(lambda: import_client(self.app.root, path))
 
     def connect(self):
-        self.perform(lambda: connect(self.app.root))
+        if self.busy and self.operation == "connect":
+            self.retry_login = True
+            self.login_cancel.set()
+            self.message.set("Kończę poprzednie oczekiwanie i otwieram nową próbę logowania. Nie musisz zamykać kreatora.")
+            return
+        cancel = threading.Event()
+        self.login_cancel = cancel
+        self.perform(lambda: connect(self.app.root, cancel=cancel), operation="connect")
+
+    def cancel_login(self):
+        if self.login_cancel is not None:
+            self.retry_login = False
+            self.login_cancel.set()
+            self.message.set("Anulowanie oczekiwania na logowanie…")
 
     def channels(self):
         self.perform(lambda: YouTube(LocalizationStore(self.app.root)).channels(), self.show_channels)
@@ -232,9 +263,8 @@ class LocalizationWizard:
                     return
                 except RuntimeError:
                     pass
-                staging = Path(tempfile.gettempdir()) / ("kolejka-madlad-" + signature(str(self.app.root))[:12])
                 with (self.app.root / "lokalizacje-model.log").open("ab") as log:
-                    process = subprocess.Popen([config["translation_python"], "-m", "batch.localization.translation", "--setup", str(self.app.root), "--staging", str(staging)],
+                    process = subprocess.Popen([config["translation_python"], "-m", "batch.localization.translation", "--setup", str(self.app.root)],
                                                cwd=APP, stdout=log, stderr=log, creationflags=NO_WINDOW, shell=False)
                     with ChildGuard(process):
                         if process.wait():
@@ -291,8 +321,13 @@ class LocalizationWizard:
         self.metadata_preview.insert("1.0", source_text(video))
         self.metadata_preview.configure(state="disabled")
         status = connection_status(self.app.root)
+        self.complete = bool(metadata_source(video))
         if status.ready:
-            self.message.set("Konto i kanał skonfigurowane. Przejrzyj pobrane dane. Przygotowanie i publikację uruchamiasz osobno.")
+            if metadata_source(video).get("source") == "public" or not self.complete:
+                self.complete = False
+                self.message.set("Konto jest skonfigurowane, ale pokazane dane nie potwierdzają odczytu przez API. Kliknij Pobierz i sprawdź tytuł oraz opis. Próba dotyczy jednego filmu.")
+            else:
+                self.message.set("Pokazano dane jednego filmu pobrane przez API. Po zakończeniu kreatora użyj Odśwież z YouTube, aby pobrać pozostałe. Bez zaznaczenia odświeżysz cały katalog kanału.")
         else:
             self.message.set("Tryb lokalny. Publikacja nie jest skonfigurowana: " + status.message + ". Publiczny odczyt nie potwierdza dostępu do konta.")
 
@@ -325,6 +360,8 @@ class LocalizationWizard:
 
     def close(self):
         self.closed = True
+        if self.login_cancel is not None:
+            self.login_cancel.set()
         if hasattr(self, "after"):
             self.dialog.after_cancel(self.after)
         self.dialog.destroy()

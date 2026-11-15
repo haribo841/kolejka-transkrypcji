@@ -8,9 +8,10 @@ Open **Kreator lokalizacji** in the new tab or Configuration. Complete one step 
 
 1. In Google Cloud, create or select a project, enable **YouTube Data API v3**, configure the OAuth consent screen and add your Google account as a test user when using Testing mode. Create an OAuth client of type **Desktop app** and download its JSON. Import that file in the wizard.
 2. Click **Połącz konto**, sign in through the system browser and grant access. The application uses PKCE with a loopback callback and stores the refresh token in Windows Credential Manager. Browser cookies configured for media downloads serve a separate purpose.
+   If Google rejects the attempt without returning to the application, use **Ponów logowanie** in the same wizard. This cancels the previous wait before opening a new attempt. **Anuluj oczekiwanie na logowanie** releases the waiting state without closing the window. Other step actions are disabled while their work is in progress.
 3. Load and select the channel to edit. Every publication checks channel ownership.
 4. Install the isolated Python 3.12 translation environment. The equivalent command is `./Instaluj-tlumaczenia.ps1` in PowerShell.
-5. Download and convert the pinned `google/madlad400-3b-mt` revision to CTranslate2 INT8. Conversion needs about 12 GB for the source weights plus working space. The final model runs on CPU. The wizard places conversion files in the system temporary directory, and the converted model under the data root.
+5. Download and convert the pinned `google/madlad400-3b-mt` revision to CTranslate2 INT8. Conversion needs about 12 GB for the source weights plus working space. The final model runs on CPU. Downloads reuse a managed workspace in the system temporary directory. Conversion uses a private folder under the data root's `modele` directory, then publishes `modele/madlad400-3b-ct2` without overwriting an existing model. Setup selects its own workspace and rejects model destinations outside this folder before downloading.
 6. Run the local translation trial and inspect its results. This does not start either production queue or publish to YouTube.
 7. Check the actual title and description of one selected video. This is a separate check from the model trial. The wizard displays the retrieved text and distinguishes authenticated API access from a public preview.
 
@@ -19,6 +20,8 @@ You may choose **Pomiń Google (bez publikacji)** to configure local processing 
 ## Prepare and review a batch
 
 Select videos using Ctrl/Shift. **Odśwież z YouTube** refreshes selected videos and caption-track information through the API when Google is configured. With no selection, it refreshes the channel upload catalog and metadata, including available private uploads for the authorized owner. Without Google, select videos to read their public titles and descriptions anonymously through yt-dlp. This does not download media or establish a publication baseline, and cannot confirm other localizations or account ownership. A full catalog refresh and publication require Google setup. The original XLSX remains unchanged.
+
+The wizard's metadata trial covers one video. Refresh the main tab afterward for the rest of your selection or channel catalog. A refresh clicked during an automatic table read is queued and runs once that read finishes. The button changes to **Odświeżanie…** and remains busy while the detached session runs. The persistent action message and session progress are displayed separately, so table updates do not erase an accepted command or error.
 
 Before a remote read, the source preview shows the catalog title and explicitly says that the description has not been retrieved. A retrieved empty description is labelled separately. Polish and English draft fields remain empty until you prepare translations or enter text yourself. The selected video's source and prepared fields refresh when a background operation finishes, preserving unsaved corrections. If the same field changes in the background while you edit it, **Zapisz teksty** asks before replacing that newer version and retains its history.
 
@@ -31,6 +34,8 @@ The application prepares:
 - An optional native **Instrumental** stem from the retained original audio. This removes all voices, including game dialogue or singing. It is not a narrator-specific separator. Listen before approving: voice leakage and damaged effects are possible. The original mix and the existing vocal file are preserved.
 
 Empty descriptions require deliberate approval. Speech-free recordings can be marked as not requiring subtitles. Polish and English dubbing remain **Odłożone**; this version does not synthesize voices.
+
+If the underlying speech recognition is incorrect, click **Transkrybuj ponownie…** in the subtitle editor or transcription queue. This reruns Whisper for one recording with fresh checkpoints, using the retained original mix or vocal and a selectable speech language. It does not translate text in the editor. Previous transcripts and caption revisions are retained. After success, PL/EN captions show **Brak** and appear under **Do przygotowania**: select the film, enable captions in the preparation tasks, prepare them again, then review and approve. Titles, descriptions and content already published on YouTube are unchanged. An editor opened before the new transcription cannot overwrite its replacement subtitles.
 
 New files live in `lokalizacje/<video-id>` under the data root. Preparation, approval and publication are separate states. Editing a field revokes its approval; older field revisions remain in the database history. Synchronization preserves local text while flagging relevant remote changes. The CSV report lists each asset and its current problem or remaining step.
 

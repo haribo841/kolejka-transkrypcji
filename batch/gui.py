@@ -200,6 +200,9 @@ class QueueWindow:
                                   ("transcript", "Otwórz TXT", self.open_transcript)):
             self.button(actions, key, text, action).pack(side="left", padx=(0, 8))
         self.selected_only = tk.BooleanVar(master=self.window, value=False)
+        help_button(outer, "Transkrybuj ponownie…", self.retranscribe,
+                    "Rozpoznaje wybrane nagranie od nowa, także ze statusem Gotowe. Zachowuje poprzednie wersje i audio.",
+                    self.help_status).pack(anchor="w", pady=(4, 0))
         collapsible_help(outer, self.help_status)
         self.wrap_labels(outer)
 
@@ -790,6 +793,10 @@ class QueueWindow:
             return
         self.store.control(stop=1)
         self.update_session_controls()
+
+    def retranscribe(self, ids=None):
+        from .retranscription_ui import open_retranscription
+        open_retranscription(self.window, self.root, self.selected() if ids is None else ids)
 
     def retry(self, kind="youtube", ids=None):
         candidates = [job["id"] for job in self.store.jobs() if job["kind"] == kind]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import shutil
 
 RESERVED_WINDOWS_NAMES = {"con", "nul", "prn", "aux", "conin$", "conout$"} | {
@@ -19,6 +20,10 @@ def local_path(value, *, exists=False):
         raise ValueError("Wskaż poprawną lokalną ścieżkę.")
     if text.startswith(("\\\\.\\", "\\\\?\\")):
         raise ValueError("Ścieżki urządzeń Windows nie są obsługiwane.")
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", text) and not re.match(r"^[A-Za-z]:[\\/]", text):
+        raise ValueError("Wskaż ścieżkę lokalną, nie URI ani ciąg połączenia.")
+    if ".." in Path(text).parts:
+        raise ValueError("Ścieżka nie może zawierać przejścia do katalogu nadrzędnego.")
     path = Path(text).expanduser().resolve(strict=exists)
     if os.name == "nt" and any(reserved_component(part) for part in path.parts[1:]):
         raise ValueError("Ścieżka zawiera nazwę urządzenia lub alternatywnego strumienia Windows.")

@@ -17,6 +17,15 @@ from test_localization import IDENT, LocalizationCase
 
 
 class SessionTests(LocalizationCase):
+    def test_successful_selected_refresh_has_no_remaining_videos(self):
+        self.configure_session(mode="sync", ids=[IDENT])
+        with patch("batch.localization.worker.sync_catalog") as sync:
+            Runner(self.store, api=Mock()).run()
+        sync.assert_called_once()
+        state = self.store.session()
+        self.assertEqual(state["state"], "idle")
+        self.assertEqual(state["cursor"], len(json.loads(state["ids"])))
+
     def test_public_sync_reads_only_frozen_selection_without_authentication_or_models(self):
         self.configure_session(mode="public_sync", ids=[IDENT])
         before = self.store.base.jobs()
@@ -116,6 +125,68 @@ class SessionTests(LocalizationCase):
 
 
 class HttpTests(LocalizationCase):
+    def oauth_client(self):
+        atomic_json(self.root / "konfiguracja" / "yt-oauth-client.json", {"installed": {"client_id": "id.apps.googleusercontent.com", "client_secret": "synthetic-test-secret"}})
+
+    def test_login_wait_can_be_cancelled_without_a_google_callback(self):
+        from batch.localization.auth import LoginCancelled, connect
+        self.oauth_client()
+        cancelled, vault = threading.Event(), Mock()
+        with patch("batch.localization.auth.token_request") as exchange:
+            with self.assertRaises(LoginCancelled):
+                connect(self.root, vault=vault, browser=lambda _url: cancelled.set(), cancel=cancelled, timeout=60)
+        exchange.assert_not_called()
+        vault.write.assert_not_called()
+
+    def test_google_denial_returns_an_actionable_error_and_can_be_retried(self):
+        from batch.localization.auth import connect
+        self.oauth_client()
+        threads = []
+        def browser(url):
+            query = parse_qs(urlparse(url).query)
+            def denied():
+                requests.get(query["redirect_uri"][0], params={"state": query["state"][0], "error": "access_denied"}, timeout=3)
+            thread = threading.Thread(target=denied)
+            threads.append(thread)
+            thread.start()
+        vault = Mock()
+        for _ in range(2):
+            with self.assertRaisesRegex(AuthError, "użytkowników testowych"):
+                connect(self.root, vault=vault, browser=browser, timeout=5)
+        for thread in threads:
+            thread.join(3)
+        vault.write.assert_not_called()
+
+    def test_cancelled_exchange_cannot_persist_credentials_from_an_old_attempt(self):
+        from batch.localization.auth import LoginCancelled, connect
+        self.oauth_client()
+        cancelled, vault = threading.Event(), Mock()
+        threads = []
+        def browser(url):
+            query = parse_qs(urlparse(url).query)
+            def granted():
+                requests.get(query["redirect_uri"][0], params={"state": query["state"][0], "code": "test-code"}, timeout=3)
+            thread = threading.Thread(target=granted)
+            threads.append(thread)
+            thread.start()
+        def exchange(_payload):
+            cancelled.set()
+            return {"access_token": "synthetic", "refresh_token": "must-not-be-persisted"}
+        with patch("batch.localization.auth.token_request", side_effect=exchange):
+            with self.assertRaises(LoginCancelled):
+                connect(self.root, vault=vault, browser=browser, cancel=cancelled, timeout=5)
+        for thread in threads:
+            thread.join(3)
+        vault.write.assert_not_called()
+
+    def test_browser_failure_returns_without_waiting_for_the_login_timeout(self):
+        from batch.localization.auth import connect
+        self.oauth_client()
+        vault = Mock()
+        with self.assertRaisesRegex(AuthError, "przeglądarki"):
+            connect(self.root, vault=vault, browser=lambda _url: False, timeout=60)
+        vault.write.assert_not_called()
+
     def test_public_metadata_reads_exact_link_without_downloading_or_using_credentials(self):
         from batch.localization.metadata import extract_public
         from unittest.mock import MagicMock

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import webbrowser
@@ -64,11 +65,15 @@ class LocalizationTab:
         self.app, self.parent = app, parent
         self.store, self.rows, self.events = None, [], queue.Queue()
         self.closed, self.pending, self.after, self.wizard = False, False, None, None
+        self.pending_background, self.pending_action, self.queued_action = False, "", None
+        self.worker_busy, self.worker_mode, self.google_ready, self.next_snapshot = False, "", False, 0
+        self.controls_state = None
         self.loaded, self.sort_column, self.sort_direction = "", None, None
         self.cache, self.visible, self.metadata = {}, [], {}
         self.field_baselines = {}
         self.approval_vars = {}
         self.note = tk.StringVar(master=parent, value="Wczytywanie katalogu lokalizacji w tle…")
+        self.summary = tk.StringVar(master=parent)
         self.search, self.filter = tk.StringVar(master=parent), tk.StringVar(master=parent, value="Wszystkie")
         self.tasks = {k: tk.BooleanVar(master=parent, value=True) for k in ("metadata", "captions", "audio")}
         frame = ttk.Frame(parent, padding=10)
@@ -80,7 +85,10 @@ class LocalizationTab:
                    ("Następny nieukończony", self.next, "Przewija do pierwszego widocznego filmu wymagającego przygotowania albo sprawdzenia."),
                    ("Raport CSV", self.report, "Eksportuje stany przygotowania, publikacji i przyczyny problemów do Excela.")]
         for text, action, hint in actions:
-            help_button(toolbar, text, action, hint, app.help_status).pack(side="left", padx=(0, 6))
+            button = help_button(toolbar, text, action, hint, app.help_status)
+            button.pack(side="left", padx=(0, 6))
+            if action == self.sync:
+                self.sync_button = button
         self.configuration = tk.StringVar(master=parent)
         ttk.Label(frame, textvariable=self.configuration, wraplength=1240).pack(fill="x", pady=(5, 0))
         filters = ttk.Frame(frame)
@@ -147,6 +155,7 @@ class LocalizationTab:
             check.pack(side="left", padx=5)
             Tooltip(check, "Wybór dotyczy następnej sesji przygotowania. Gotowe, niezmienione elementy są pomijane.", app.help_status)
         ttk.Label(frame, text="Metadane: zatwierdź tytuł i opis danego języka. Audio PL/EN: odłożone. Publikacja audio odbywa się w Studio.").pack(anchor="w", pady=3)
+        ttk.Label(frame, textvariable=self.summary, wraplength=1250).pack(fill="x", pady=3)
         self.progress = ttk.Label(frame, textvariable=self.note, wraplength=1250)
         self.progress.pack(fill="x", pady=3)
         buttons = ttk.Frame(frame)
@@ -172,13 +181,15 @@ class LocalizationTab:
                 self.open_files(ident)
 
     def selected(self):
-        return [i for i in self.tree.get_children() if i in self.tree.selection()]
+        selection = set(self.tree.selection())
+        return [ident for ident in self.visible if ident in selection] if selection else []
 
-    def perform(self, function, callback=None):
+    def perform(self, function, callback=None, *, background=False, action=""):
         if self.pending:
-            self.note.set("Poczekaj na zakończenie bieżącej czynności.")
-            return
+            return self.queue_action(function, callback, background, action)
         self.pending = True
+        self.pending_background, self.pending_action = background, action
+        self.update_action_controls()
         def run():
             try:
                 result = function()
@@ -187,6 +198,36 @@ class LocalizationTab:
                 self.events.put((None, None, str(error)))
         self.thread = threading.Thread(target=run, daemon=True)
         self.thread.start()
+        return True
+
+    def queue_action(self, function, callback, background, action):
+        if background:
+            return False
+        if self.pending_background and self.queued_action is None:
+            self.queued_action = (function, callback, action)
+            self.note.set("Polecenie przyjęte. Kończę odczyt listy w tle i wykonam je automatycznie.")
+            self.update_action_controls()
+            return True
+        self.note.set("Polecenie jest już przyjęte albo trwa inna czynność. Poczekaj na jej wynik.")
+        return False
+
+    def update_action_controls(self):
+        command_busy = (self.pending and not self.pending_background) or self.queued_action is not None
+        busy = self.worker_busy or command_busy
+        queued = self.queued_action[2] if self.queued_action else ""
+        refreshing = self.pending_action == "sync" or queued == "sync" or (self.worker_busy and self.worker_mode in {"sync", "public_sync"})
+        state = (busy, self.google_ready, refreshing, self.worker_busy)
+        if state == self.controls_state:
+            return
+        self.controls_state = state
+        for key in ("prepare", "publish", "resume"):
+            self.controls[key].state(["disabled"] if busy else ["!disabled"])
+        if not self.google_ready:
+            self.controls["publish"].state(["disabled"])
+        self.sync_button.configure(text="Odświeżanie…" if refreshing else "Odśwież z YouTube")
+        self.sync_button.state(["pressed"] if refreshing else ["!pressed"])
+        self.sync_button.state(["disabled"] if busy else ["!disabled"])
+        self.controls["stop"].state(["!disabled"] if self.worker_busy else ["disabled"])
 
     def snapshot(self):
         if self.store is None:
@@ -208,13 +249,16 @@ class LocalizationTab:
         self.render()
         remaining = max(0, len(json.loads(control["ids"])) - control["cursor"])
         drafts = sum(j.get("status") == "draft" for j in self.app.jobs.values())
-        self.note.set(f"Filmy: {len(self.rows)} | Szkice bez ID: {drafts} (kolejka YouTube) | Widoczne: {len(self.visible)} | Zaznaczone: {len(self.selected())} | API dziś: {control.get('quota_used', 0)} jedn. | Sesja: {control['mode'] or 'brak'}, pozostało {remaining}. {control['message']}")
-        busy = WorkerLock.busy(self.app.root / "lokalizacje") or control["state"] == "starting"
-        for key in ("prepare", "publish", "resume"):
-            self.controls[key].state(["disabled"] if busy else ["!disabled"])
-        if not connection_status(self.app.root).ready:
-            self.controls["publish"].state(["disabled"])
-        self.controls["stop"].state(["!disabled"] if busy else ["disabled"])
+        self.summary.set(f"Filmy: {len(self.rows)} | Szkice bez ID: {drafts} (kolejka YouTube) | Widoczne: {len(self.visible)} | Zaznaczone: {len(self.selected())} | API dziś: {control.get('quota_used', 0)} jedn. | Sesja: {control['mode'] or 'brak'}, pozostało {remaining}. {control['message']}")
+        if self.note.get() == "Wczytywanie katalogu lokalizacji w tle…":
+            self.note.set("Wybierz filmy i kliknij Odśwież z YouTube. Potem Przygotuj zaznaczone wypełni wersje PL/EN.")
+        was_busy = self.worker_busy
+        self.worker_busy = WorkerLock.busy(self.app.root / "lokalizacje") or control["state"] == "starting"
+        self.worker_mode = control["mode"]
+        if was_busy and not self.worker_busy and control["message"]:
+            self.note.set(control["message"])
+        self.google_ready = connection_status(self.app.root).ready
+        self.update_action_controls()
         current = next((r for r in self.rows if r["video_id"] == self.loaded), None)
         if current:
             for (kind, lang), variable in self.approval_vars.items():
@@ -225,23 +269,45 @@ class LocalizationTab:
     def tick(self):
         if self.closed:
             return
+        self.receive_events()
+        if not self.pending:
+            self.start_next_action()
+        self.after = self.parent.after(150, self.tick)
+
+    def receive_events(self):
         while True:
             try:
                 callback, result, error = self.events.get_nowait()
             except queue.Empty:
                 break
-            self.pending = False
+            background, action = self.pending_background, self.pending_action
+            self.pending, self.pending_background, self.pending_action = False, False, ""
             if error:
                 self.note.set(error)
-                messagebox.showerror("Lokalizacje YouTube", error, parent=self.parent)
-            elif callback:
-                callback(result)
-        if not self.pending:
-            if len(self.selected()) == 1 and self.selected()[0] != self.loaded:
-                self.selection_changed()
-            elif self.store is None or self.app.notebook.select() == str(self.parent):
-                self.perform(self.snapshot, self.received)
-        self.after = self.parent.after(1500, self.tick)
+                if not background:
+                    messagebox.showerror("Lokalizacje YouTube", error, parent=self.parent)
+            else:
+                if action in {"sync", "prepare", "publish", "resume"}:
+                    self.worker_busy = True
+                    if action != "resume":
+                        self.worker_mode = action
+                    self.next_snapshot = 0
+                if callback:
+                    callback(result)
+        self.update_action_controls()
+
+    def start_next_action(self):
+        if self.queued_action is not None:
+            function, callback, action = self.queued_action
+            self.queued_action = None
+            self.perform(function, callback, action=action)
+            return
+        selected = self.selected()
+        if len(selected) == 1 and selected[0] != self.loaded:
+            self.selection_changed()
+        elif time.monotonic() >= self.next_snapshot and (self.store is None or self.app.notebook.select() == str(self.parent)):
+            self.next_snapshot = time.monotonic() + 1.5
+            self.perform(self.snapshot, self.received, background=True)
 
     def render(self, reset=False):
         rows = [r for r in self.rows if matches(r, self.search.get(), self.filter.get())]
@@ -288,7 +354,7 @@ class LocalizationTab:
         ident = ids[0]
         def load():
             return ident, self.store.get_video(ident), self.store.items(ident)
-        self.perform(load, self.load_details)
+        self.perform(load, self.load_details, background=True)
 
     def load_details(self, result, *, preserve_edits=False):
         ident, video, items = result
@@ -393,7 +459,17 @@ class LocalizationTab:
 
     def captions(self, lang):
         if self.loaded:
-            CaptionEditor(self.parent, self.store, self.loaded, lang, lambda: self.note.set("Zmieniono napisy. Odświeżenie zachowa wybór i przewijanie."))
+            ident = self.loaded
+            CaptionEditor(self.parent, self.store, ident, lang,
+                          lambda: self.note.set("Zmieniono napisy. Odświeżenie zachowa wybór i przewijanie."),
+                          retranscribe=lambda parent: self.retranscribe(ident, parent))
+
+    def retranscribe(self, ident, parent):
+        from ..retranscription_ui import open_retranscription
+        job_id = self.store.get_video(ident)["job_id"]
+        def started():
+            self.note.set("Nowa transkrypcja pracuje w kolejce YouTube. Po sukcesie użyj Przygotuj zaznaczone z włączonymi napisami PL/EN.")
+        open_retranscription(parent, self.store.root, [job_id], started=started)
 
     def require_ids(self):
         ids = self.selected()
@@ -409,7 +485,7 @@ class LocalizationTab:
             tasks = [k for k, value in self.tasks.items() if value.get()]
             if not tasks:
                 raise ValueError("Wybierz co przygotować.")
-            self.perform(lambda: launch(self.app.root, "prepare", ids, tasks), lambda _: self.note.set("Przygotowanie uruchomione. Kolejność i zakres zapisano; zamknięcie okna nie przerywa pracy."))
+            self.perform(lambda: launch(self.app.root, "prepare", ids, tasks), lambda _: self.note.set("Przygotowanie uruchomione. Kolejność i zakres zapisano; zamknięcie okna nie przerywa pracy."), action="prepare")
         except ValueError as error:
             self.note.set(str(error))
 
@@ -421,7 +497,9 @@ class LocalizationTab:
             return
         mode = "sync" if status.ready else "public_sync"
         message = "Odświeżanie przez API rozpoczęte." if status.ready else "Pobieranie publicznych tytułów i opisów. Konto do publikacji nie jest połączone."
-        self.perform(lambda: launch(self.app.root, mode, ids), lambda _: self.note.set(message))
+        scope = f"Zaznaczone filmy: {len(ids)}." if ids else "Cały katalog kanału."
+        self.note.set("Przyjęto odświeżanie. " + scope)
+        self.perform(lambda: launch(self.app.root, mode, ids), lambda _: self.note.set(message + " " + scope), action="sync")
 
     def show_preview(self, publish=False):
         try:
@@ -440,7 +518,7 @@ class LocalizationTab:
             text.configure(state="disabled")
             if publish:
                 def submit():
-                    self.perform(lambda: launch(self.app.root, "publish", ids, frozen=frozen))
+                    self.perform(lambda: launch(self.app.root, "publish", ids, frozen=frozen), action="publish")
                     dialog.destroy()
                 ttk.Button(dialog, text="Potwierdzam publikację powyższych wersji", command=submit).pack(pady=8)
             ttk.Button(dialog, text="Zamknij", command=dialog.destroy).pack(pady=6)
@@ -454,7 +532,7 @@ class LocalizationTab:
 
     def resume(self):
         from .worker import resume
-        self.perform(lambda: resume(self.app.root), lambda _: self.note.set("Wznowiono zapisaną sesję, z jej poprzednim zakresem i zatwierdzeniami."))
+        self.perform(lambda: resume(self.app.root), lambda _: self.note.set("Wznowiono zapisaną sesję, z jej poprzednim zakresem i zatwierdzeniami."), action="resume")
 
     def next(self):
         by_id = {row["video_id"]: row for row in self.rows}
