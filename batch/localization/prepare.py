@@ -13,6 +13,10 @@ from .store import metadata_source, source_field
 from .translation import REVISION
 
 
+PROCESS_LOG = "proces.log"
+CAPTION_PREFIX = "captions:"
+
+
 def text_key(store, value):
     return signature({"source": value, "model": REVISION, "glossary": options(store.root)["glossary"]})
 
@@ -23,7 +27,7 @@ def child(python, module, request, work, progress):
     request_path = work / (module.rsplit(".", 1)[-1] + "-request.json")
     atomic_json(request_path, request)
     env = dict(os.environ, PYTHONIOENCODING="utf-8", HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1")
-    with (work / "proces.log").open("ab") as log:
+    with (work / PROCESS_LOG).open("ab") as log:
         process = subprocess.Popen([python, "-m", module, str(request_path)], cwd=APP, env=env,
                                    creationflags=NO_WINDOW, stdout=subprocess.PIPE, stderr=log,
                                    text=True, encoding="utf-8", errors="replace", shell=False)
@@ -39,12 +43,12 @@ def child(python, module, request, work, progress):
             finally:
                 process.stdout.close()
     if code:
-        with (work / "proces.log").open("rb") as reader:
+        with (work / PROCESS_LOG).open("rb") as reader:
             reader.seek(max(0, reader.seek(0, 2) - 4096))
             tail = reader.read().decode("utf-8", errors="replace")
         if resource_failure(RuntimeError(tail)):
-            raise ResourceError("Brak zasobów w procesie pomocniczym. Sprawdź pamięć i miejsce na dysku. Log: " + str(work / "proces.log"))
-        raise RuntimeError("Proces pomocniczy zakończył się błędem. Otwórz log: " + str(work / "proces.log"))
+            raise ResourceError("Brak zasobów w procesie pomocniczym. Sprawdź pamięć i miejsce na dysku. Log: " + str(work / PROCESS_LOG))
+        raise RuntimeError("Proces pomocniczy zakończył się błędem. Otwórz log: " + str(work / PROCESS_LOG))
 
 
 def metadata_units(store, ident):
@@ -79,7 +83,7 @@ def caption_units(store, ident, cues):
             store.save_item(ident, "captions", lang, "", key, na=True)
             continue
         for cue in cues:
-            units.append({"key": "captions:" + lang + ":" + cue["id"], "lang": lang, "text": cue["text"]})
+            units.append({"key": CAPTION_PREFIX + lang + ":" + cue["id"], "lang": lang, "text": cue["text"]})
     return units
 
 
@@ -142,12 +146,12 @@ def record_text_error(store, ident, kinds, message):
 def save_translations(store, ident, units, translated, cues, model):
     base = directory(store.root, ident)
     for unit in units:
-        if not unit["key"].startswith("captions:"):
+        if not unit["key"].startswith(CAPTION_PREFIX):
             kind, lang = unit["key"].split(":")
             store.save_item(ident, kind, lang, translated[unit["key"]], unit["source_hash"], generated=True)
     for lang in ("pl", "en"):
-        if cues and "captions:" + lang + ":" + cues[0]["id"] in translated:
-            output = [{**c, "text": translated["captions:" + lang + ":" + c["id"]]} for c in cues]
+        if cues and CAPTION_PREFIX + lang + ":" + cues[0]["id"] in translated:
+            output = [{**c, "text": translated[CAPTION_PREFIX + lang + ":" + c["id"]]} for c in cues]
             text = render(output)
             path = base / ("napisy." + lang + ".srt")
             atomic_bytes(path, text.encode("utf-8"))
@@ -191,21 +195,27 @@ def prepare_background(store, ident, progress):
     store.save_item(ident, "audio", "zxx", digest(output), key, str(output), generated=True)
 
 
+def prepare_text_tasks(store, ident, tasks, progress):
+    errors = []
+    try:
+        errors.extend(prepare_text(store, ident, tasks, progress))
+    except ResourceError:
+        raise
+    except (ValueError, RuntimeError, OSError) as error:
+        if resource_failure(error):
+            raise ResourceError(str(error)) from error
+        errors.append(str(error))
+        kinds = ("title", "description") if "metadata" in tasks else ()
+        if "captions" in tasks:
+            kinds += ("captions",)
+        record_text_error(store, ident, kinds, str(error))
+    return errors
+
+
 def prepare_one(store, ident, tasks, progress):
     errors = []
     if {"metadata", "captions"} & set(tasks):
-        try:
-            errors.extend(prepare_text(store, ident, tasks, progress))
-        except ResourceError:
-            raise
-        except (ValueError, RuntimeError, OSError) as error:
-            if resource_failure(error):
-                raise ResourceError(str(error)) from error
-            errors.append(str(error))
-            kinds = ("title", "description") if "metadata" in tasks else ()
-            if "captions" in tasks:
-                kinds += ("captions",)
-            record_text_error(store, ident, kinds, str(error))
+        errors.extend(prepare_text_tasks(store, ident, tasks, progress))
     if "audio" in tasks:
         try:
             prepare_background(store, ident, progress)

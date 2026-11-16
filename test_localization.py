@@ -41,6 +41,12 @@ class LocalizationCase(unittest.TestCase):
 
 
 class StateTests(LocalizationCase):
+    def test_session_rejects_unknown_keys_mixed_with_valid_updates_atomically(self):
+        before = self.store.session()
+        with self.assertRaises(ValueError):
+            self.store.session(state="running", unexpected="outside schema")
+        self.assertEqual(self.store.session(), before)
+
     def test_public_metadata_migration_preserves_legacy_snapshots_and_asr(self):
         before = self.store.base.jobs()
         with self.store.base.connect() as db:
@@ -169,8 +175,9 @@ class SubtitleTests(LocalizationCase):
         self.store.save_item(IDENT, "captions", "pl", render(parse_srt(SRT)), "source")
         save_captions(self.store, IDENT, "pl", SRT.replace("Dzień dobry.", "Witaj."))
         self.assertIn("Witaj", self.store.item(IDENT, "captions", "pl")["value"])
+        incomplete = render(parse_srt(SRT)[:1])
         with self.assertRaises(ValueError):
-            save_captions(self.store, IDENT, "pl", render(parse_srt(SRT)[:1]))
+            save_captions(self.store, IDENT, "pl", incomplete)
 
     def test_no_speech_has_an_explicit_not_applicable_state(self):
         from batch.localization.prepare import caption_units

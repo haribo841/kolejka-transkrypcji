@@ -16,7 +16,7 @@ from .common import (APP, NO_WINDOW, ResourceError, WorkerLock, application_pyth
                      windows_sleep_guard)
 from .diarization import run_diarization, validate_diarization
 from .exporter import export, verify_outputs
-from .result_paths import assert_output_owner, reserve_output
+from .result_paths import RESULT_MANIFEST, assert_output_owner, reserve_output
 from .media import EmptyAudio, MediaError, decode, download, media_metadata
 from .output_fallback import ensure_output
 from .retranscription import (attempt_work, invalidate_captions, pending_request, previous_results,
@@ -60,7 +60,7 @@ def preflight(config, root, kind="all"):
 
 def cleanup(work, job):
     work = Path(work)
-    if (read_json(work.parent / "gotowe.json") or {}).get("preserve_work"):
+    if (read_json(work.parent / RESULT_MANIFEST) or {}).get("preserve_work"):
         return
     # Never delete source paths. Only owned intermediate files in this job folder.
     for name in ("audio.f32le", "audio.f32le.partial"):
@@ -86,6 +86,12 @@ def audio_completion(work, duration, uvr_report):
     decoded = read_json(work / "pcm.json") or {}
     recovery = decoded.get("recovery")
     return max(duration, decoded.get("source_duration", duration)), True, recovery
+
+
+def export_stage(request, warning):
+    if request:
+        return "Aktualizacja napisów po nowej transkrypcji"
+    return "Gotowe: odzyskane audio" if warning else "Gotowe"
 
 
 
@@ -124,7 +130,7 @@ class Worker:
                                "track": job["audio_track"], "config": config, "format": 1})
         if verify_outputs(folder, job["identity"], execution):
             # Handles a crash after export but before the SQLite commit / cleanup.
-            manifest = read_json(folder / "gotowe.json") or {}
+            manifest = read_json(folder / RESULT_MANIFEST) or {}
             warning = manifest.get("terminal_reason") or {}
             self.store.update(job["id"], status="done", stage="Gotowe: odzyskane audio" if warning else "Gotowe",
                               progress=100, error=warning.get("message", ""), error_code=warning.get("code", ""),
@@ -160,7 +166,7 @@ class Worker:
                 self.retry_audio(job, request, folder, work, execution, manifest, previous)
             if verify_outputs(folder, job["identity"], execution):
                 invalidate_captions(self.root, job, request, work)
-                current = read_json(folder / "gotowe.json", {})
+                current = read_json(folder / RESULT_MANIFEST, {})
                 warning = current.get("terminal_reason") or {}
                 self.store.update(job["id"], status="done", stage="Gotowe: nowa transkrypcja", progress=100,
                                   processed_until=current["processed_until"], error=warning.get("message", ""),
@@ -284,7 +290,7 @@ class Worker:
                           preserve_work=True, terminal_reason=warning)
         export(folder, report, execution)
         self.store.update(job["id"], status="running" if request else "done",
-                          stage="Aktualizacja napisów po nowej transkrypcji" if request else ("Gotowe: odzyskane audio" if warning else "Gotowe"),
+                          stage=export_stage(request, warning),
                           progress=100, error=warning.get("message", ""), error_code=warning.get("code", ""), processed_until=duration)
         try:
             cleanup(work, job)
@@ -465,6 +471,18 @@ def wait_for_launch(root, timeout=10):
         time.sleep(.02)
 
 
+def enqueue_retry(store, kind, job_ids, order_ids, scope_mode, request):
+    validate_request(request)
+    if not job_ids or len(job_ids) != 1 or scope_mode != "selected" or list(order_ids or []) != list(job_ids):
+        raise ValueError("Ponowna transkrypcja obejmuje dokładnie jedno zaznaczone nagranie.")
+    if any(WorkerLock.busy(store.root / name) for name in ("konfiguracja", "lokalizacje", "lokalizacje/uruchamianie")):
+        raise ResourceError("Zatrzymaj konfigurację i sesję lokalizacji przed ponowną transkrypcją.")
+    selected = store.get(job_ids[0])
+    if selected is None or selected["kind"] != kind:
+        raise ValueError("Nagranie nie należy do wybranej kolejki.")
+    store.request_retranscription(job_ids[0], request)
+
+
 def launch(root, *, kind="all", job_ids=None, order_ids=None, scope_mode="legacy", retry_request=None):
     root = Path(root).resolve()
     kind = scope_kind(kind)
@@ -480,15 +498,7 @@ def launch(root, *, kind="all", job_ids=None, order_ids=None, scope_mode="legacy
             raise ResourceError("Kolejka już pracuje. Dokończ bieżące nagranie i zatrzymaj ją przed zmianą rodzaju lub zakresu.")
         store = Store(root)
         if retry_request is not None:
-            validate_request(retry_request)
-            if not job_ids or len(job_ids) != 1 or scope_mode != "selected" or list(order_ids or []) != list(job_ids):
-                raise ValueError("Ponowna transkrypcja obejmuje dokładnie jedno zaznaczone nagranie.")
-            if any(WorkerLock.busy(root / name) for name in ("konfiguracja", "lokalizacje", "lokalizacje/uruchamianie")):
-                raise ResourceError("Zatrzymaj konfigurację i sesję lokalizacji przed ponowną transkrypcją.")
-            selected = store.get(job_ids[0])
-            if selected is None or selected["kind"] != kind:
-                raise ValueError("Nagranie nie należy do wybranej kolejki.")
-            store.request_retranscription(job_ids[0], retry_request)
+            enqueue_retry(store, kind, job_ids, order_ids, scope_mode, retry_request)
         store.start(kind=kind, job_ids=job_ids, order_ids=order_ids, scope_mode=scope_mode)
         started = True
         log_path = root / "worker.log"

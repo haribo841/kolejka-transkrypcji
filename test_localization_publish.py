@@ -3,7 +3,8 @@ import copy
 from unittest.mock import Mock
 
 from batch.localization.api import ApiError, ConflictError
-from batch.localization.publish import (TRACK_NAMES, frozen_approvals, publish_caption, publish_one)
+from batch.localization.publish import (TRACK_NAMES, frozen_approvals, metadata_matches,
+                                        publish_caption, publish_one, relevant)
 from test_localization import IDENT, SRT, LocalizationCase, remote
 
 
@@ -44,6 +45,37 @@ class FakeYouTube:
 
 
 class PublicationTests(LocalizationCase):
+    def test_metadata_comparison_accepts_equal_fields_and_detects_each_remote_change(self):
+        baseline = remote()
+        expected = relevant(baseline)
+        self.assertTrue(metadata_matches(copy.deepcopy(baseline), expected))
+        extra_fields = {**baseline, "etag": "different", "statistics": {"viewCount": "99"}}
+        self.assertTrue(metadata_matches(extra_fields, expected))
+        for key in ("title", "description", "tags", "categoryId", "defaultLanguage", "defaultAudioLanguage"):
+            changed = copy.deepcopy(baseline)
+            changed["snippet"][key] = "changed"
+            with self.subTest(field=key):
+                self.assertFalse(metadata_matches(changed, expected))
+        changed = copy.deepcopy(baseline)
+        changed["localizations"]["de"]["description"] = "changed translation"
+        self.assertFalse(metadata_matches(changed, expected))
+
+    def test_only_fully_approved_metadata_pairs_are_frozen(self):
+        self.save_approved("title", "pl", "Tytuł")
+        self.save_approved("captions", "en", SRT)
+        frozen = frozen_approvals(self.store, [IDENT])[IDENT]
+        self.assertEqual(set(frozen), {"captions:en"})
+
+    def test_missing_remote_baseline_blocks_write(self):
+        self.metadata()
+        with self.store.base.connect() as db:
+            db.execute("UPDATE ytl_videos SET snapshot='{}' WHERE video_id=?", (IDENT,))
+        api = FakeYouTube()
+        frozen = frozen_approvals(self.store, [IDENT])[IDENT]
+        with self.assertRaises(ConflictError):
+            publish_one(self.store, api, IDENT, frozen, lambda _: None)
+        self.assertEqual(api.writes, 0)
+
     def metadata(self):
         for kind, pl, en in (("title", "Polski tytuł", "English title"), ("description", "Polski opis", "English description")):
             self.save_approved(kind, "pl", pl)
@@ -77,8 +109,9 @@ class PublicationTests(LocalizationCase):
         self.metadata()
         api = FakeYouTube()
         api.data["snippet"]["description"] = "Edited in Studio"
+        frozen = frozen_approvals(self.store, [IDENT])[IDENT]
         with self.assertRaises(ConflictError):
-            publish_one(self.store, api, IDENT, frozen_approvals(self.store, [IDENT])[IDENT], lambda _: None)
+            publish_one(self.store, api, IDENT, frozen, lambda _: None)
         self.assertEqual(api.writes, 0)
 
     def test_timeout_after_caption_creation_is_verified_without_duplicate_upload(self):

@@ -10,29 +10,39 @@ from .store import source_field
 
 WRITABLE_SNIPPET = ("title", "description", "tags", "categoryId", "defaultLanguage", "defaultAudioLanguage")
 TRACK_NAMES = {"pl": "Polski (Kolejka transkrypcji)", "en": "English (Kolejka transkrypcji)"}
+TITLE_PREFIX = "title:"
+DESCRIPTION_PREFIX = "description:"
+CAPTION_PREFIX = "captions:"
 
 
 def approved(item):
     return item["review"] == "approved" and item["approval_hash"] == item["content_hash"] and bool(item["content_hash"])
 
 
-def frozen_approvals(store, ids):
-    result = {}
-    for ident in ids:
-        candidates = {i["kind"] + ":" + i["lang"]: i for i in store.items(ident) if approved(i) and i["kind"] != "audio"}
-        for lang in ("pl", "en"):
-            keys = ("title:" + lang, "description:" + lang)
-            if not all(k in candidates for k in keys):
-                for key in keys:
-                    candidates.pop(key, None)
-        result[ident] = {key: item["content_hash"] for key, item in candidates.items()
-                         if item["publication"] != "verified" or item["published_hash"] != item["content_hash"]}
-        # Metadata is written as a pair, even if just one approved field changed.
-        for lang in ("pl", "en"):
-            keys = ("title:" + lang, "description:" + lang)
-            if any(k in result[ident] for k in keys):
-                result[ident].update({k: candidates[k]["content_hash"] for k in keys})
+def approved_candidates(store, ident):
+    candidates = {i["kind"] + ":" + i["lang"]: i for i in store.items(ident) if approved(i) and i["kind"] != "audio"}
+    for lang in ("pl", "en"):
+        keys = (TITLE_PREFIX + lang, DESCRIPTION_PREFIX + lang)
+        if not all(k in candidates for k in keys):
+            for key in keys:
+                candidates.pop(key, None)
+    return candidates
+
+
+def frozen_video(store, ident):
+    candidates = approved_candidates(store, ident)
+    result = {key: item["content_hash"] for key, item in candidates.items()
+              if item["publication"] != "verified" or item["published_hash"] != item["content_hash"]}
+    # Metadata is written as a pair, even if just one approved field changed.
+    for lang in ("pl", "en"):
+        keys = (TITLE_PREFIX + lang, DESCRIPTION_PREFIX + lang)
+        if any(k in result for k in keys):
+            result.update({k: candidates[k]["content_hash"] for k in keys})
     return result
+
+
+def frozen_approvals(store, ids):
+    return {ident: frozen_video(store, ident) for ident in ids}
 
 
 def selected_items(store, ident, frozen):
@@ -52,7 +62,7 @@ def metadata_body(remote, items):
     localizations = dict(remote.get("localizations", {}))
     used = []
     for lang in ("pl", "en"):
-        keys = ["title:" + lang, "description:" + lang]
+        keys = [TITLE_PREFIX + lang, DESCRIPTION_PREFIX + lang]
         if not all(key in items for key in keys):
             continue
         pair = {kind: items[kind + ":" + lang]["value"] for kind in ("title", "description")}
@@ -73,9 +83,15 @@ def relevant(remote):
             "localizations": remote.get("localizations", {})}
 
 
+def metadata_matches(remote, expected):
+    current = relevant(remote)
+    return (current["snippet"] == expected["snippet"] and
+            current["localizations"] == expected["localizations"])
+
+
 def check_baseline(store, ident, remote):
     baseline = json.loads(store.get_video(ident)["snapshot"])
-    if not baseline or relevant(baseline) != relevant(remote):
+    if not baseline or not metadata_matches(remote, relevant(baseline)):
         raise ConflictError("Metadane na YouTube różnią się od podglądu. Odśwież i zatwierdź zmiany ponownie.")
 
 
@@ -87,12 +103,12 @@ def publish_metadata(store, api, ident, items, progress):
     target = {"snippet": body["snippet"], "localizations": body["localizations"]}
     checksum = signature(target)
     operation = store.operation(ident, "metadata", "pl-en", checksum, remote, target)
-    if relevant(remote) != target:
+    if not metadata_matches(remote, target):
         check_baseline(store, ident, remote)
         progress("Publikacja metadanych PL/EN")
         api.update_video(body, remote["etag"])
         remote = api.video(ident)
-    if relevant(remote) != target:
+    if not metadata_matches(remote, target):
         raise ApiError("Odczyt kontrolny metadanych nie zgadza się z zatwierdzoną treścią.")
     store.finish_operation(operation["id"], "verified", remote)
     for key in keys:
@@ -167,9 +183,27 @@ def publish_one(store, api, ident, frozen, progress):
         return
     publish_metadata(store, api, ident, items, progress)
     for lang in ("pl", "en"):
-        key = "captions:" + lang
+        key = CAPTION_PREFIX + lang
         if key in items:
             publish_caption(store, api, ident, items[key], progress)
+
+
+def preview_item(item, snapshot):
+    kind = item["kind"]
+    if kind == "captions":
+        value = f"{len(parse_srt(item['value']))} segmentów z własnymi timestampami"
+        old = "Istniejące ścieżki innych nazw pozostają zachowane."
+    else:
+        value = item["value"]
+        old = source_field(snapshot, kind, item["lang"])
+    return f"\n{kind} {item['lang'].upper()}\nObecnie: {old}\nPo zmianie: {value}"
+
+
+def estimated_cost(frozen):
+    if not frozen:
+        return 0
+    metadata_cost = 52 if any(k.startswith((TITLE_PREFIX, DESCRIPTION_PREFIX)) for k in frozen) else 1
+    return metadata_cost + sum(950 for k in frozen if k.startswith(CAPTION_PREFIX))
 
 
 def preview(store, ids):
@@ -181,13 +215,9 @@ def preview(store, ids):
         lines.extend(["\n" + video["title"] + " [" + ident + "]", "Podstawowy język metadanych: polski. Język audio pozostaje bez zmian."])
         for item in store.items(ident):
             if approved(item) and item["kind"] != "audio":
-                value = item["value"] if item["kind"] != "captions" else f"{len(parse_srt(item['value']))} segmentów z własnymi timestampami"
-                old = source_field(snapshot, item["kind"], item["lang"]) if item["kind"] != "captions" else "Istniejące ścieżki innych nazw pozostają zachowane."
-                lines.append(f"\n{item['kind']} {item['lang'].upper()}\nObecnie: {old}\nPo zmianie: {value}")
+                lines.append(preview_item(item, snapshot))
         frozen = frozen_approvals(store, [ident])[ident]
-        if frozen:
-            estimated += 52 if any(k.startswith(("title:", "description:")) for k in frozen) else 1
-            estimated += sum(950 for k in frozen if k.startswith("captions:"))
+        estimated += estimated_cost(frozen)
     lines.append("\nNapisy: insert 400 lub update 450 jednostek; kontrola listy 50 i odczyt treści 200. Metadane: zapis 50. Odczyty i ponowienia też zużywają pulę.")
     lines.append(f"Szacowany górny koszt tej partii: {estimated} jednostek API. Przy wyczerpaniu budżetu publikacja zatrzyma się z zachowaniem postępu.")
     return "\n".join(lines)

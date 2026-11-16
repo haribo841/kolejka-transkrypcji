@@ -129,6 +129,25 @@ class Runner:
             except Exception:
                 logging.exception("Heartbeat lokalizacji")
 
+    def prepare_environment(self, request, compute):
+        if not compute.acquire():
+            raise RuntimeError("Zasoby zajmuje kolejka transkrypcji. Wznów lokalizacje po jej zatrzymaniu.")
+        if {"metadata", "captions"} & set(request["tasks"]):
+            from .translation import ready
+            ready(self.store.root)
+            if not Path(options(self.store.root)["translation_python"]).is_file():
+                raise ResourceError("Brak środowiska tłumaczeń. Otwórz kreator lokalizacji.")
+
+    def finish_session(self, owns, compute, stop, heartbeat):
+        stop.set()
+        if heartbeat.is_alive():
+            heartbeat.join(timeout=5)
+        if compute is not None:
+            compute.close()
+        if owns:
+            state = self.store.session()["state"]
+            self.store.session(state="paused" if state == "paused" else "idle", pid=None, current_id="", stop=1, heartbeat=now())
+
     def run(self, generation=None):
         lock, compute = session_lock(self.store.root), None
         if not lock.acquire():
@@ -144,13 +163,7 @@ class Runner:
             owns = True
             if mode == "prepare":
                 compute = WorkerLock(self.store.root)
-                if not compute.acquire():
-                    raise RuntimeError("Zasoby zajmuje kolejka transkrypcji. Wznów lokalizacje po jej zatrzymaniu.")
-                if {"metadata", "captions"} & set(request["tasks"]):
-                    from .translation import ready
-                    ready(self.store.root)
-                    if not Path(options(self.store.root)["translation_python"]).is_file():
-                        raise ResourceError("Brak środowiska tłumaczeń. Otwórz kreator lokalizacji.")
+                self.prepare_environment(request, compute)
             self.store.session(state="running", pid=os.getpid(), heartbeat=now())
             heartbeat.start()
             if mode in {"publish", "sync"} and self.api is None:
@@ -160,19 +173,33 @@ class Runner:
                 self.store.session(cursor=len(ids), message="Odświeżanie zakończone. Korekty i kolejka transkrypcji zachowane.")
             else:
                 self.consume(request)
-        except (AuthError, QuotaError, RuntimeError, OSError, ValueError) as error:
+        except (RuntimeError, OSError, ValueError) as error:
             logging.exception("Sesja lokalizacji wstrzymana")
             self.store.session(state="paused", message=str(error)[:1500], stop=1)
         finally:
-            stop.set()
-            if heartbeat.is_alive():
-                heartbeat.join(timeout=5)
-            if compute is not None:
-                compute.close()
-            if owns:
-                state = self.store.session()["state"]
-                self.store.session(state="paused" if state == "paused" else "idle", pid=None, current_id="", stop=1, heartbeat=now())
-            lock.close()
+            try:
+                self.finish_session(owns, compute, stop, heartbeat)
+            finally:
+                lock.close()
+
+    def process_video(self, request, ident):
+        if request["mode"] == "public_sync":
+            from .metadata import refresh_public
+            refresh_public(self.store, ident, self.progress)
+        elif request["mode"] == "prepare":
+            errors = self.prepare(self.store, ident, request["tasks"], self.progress)
+            if errors:
+                self.store.session(message="Zapisano postęp; sprawdź szczegóły filmu: " + "; ".join(errors)[:1000])
+        else:
+            self.publish(self.store, self.api, ident, request["frozen"].get(ident, {}), self.progress)
+
+    def record_video_error(self, request, ident, error):
+        logging.exception("Problem filmu %s", ident)
+        if request["mode"] != "public_sync":
+            for item in self.store.items(ident):
+                if item["review"] == "approved" and item["publication"] != "verified":
+                    self.store.error(ident, item["kind"], item["lang"], str(error))
+        self.store.session(message="Film wymaga sprawdzenia: " + str(error)[:1000])
 
     def consume(self, request):
         ids = request["ids"]
@@ -183,24 +210,11 @@ class Runner:
                 ident = ids[index]
                 self.store.session(current_id=ident, cursor=index, message=f"{index + 1}/{len(ids)}: {self.store.get_video(ident)['title']}")
                 try:
-                    if request["mode"] == "public_sync":
-                        from .metadata import refresh_public
-                        refresh_public(self.store, ident, self.progress)
-                    elif request["mode"] == "prepare":
-                        errors = self.prepare(self.store, ident, request["tasks"], self.progress)
-                        if errors:
-                            self.store.session(message="Zapisano postęp; sprawdź szczegóły filmu: " + "; ".join(errors)[:1000])
-                    else:
-                        self.publish(self.store, self.api, ident, request["frozen"].get(ident, {}), self.progress)
+                    self.process_video(request, ident)
                 except (AuthError, QuotaError, ResourceError):
                     raise
                 except Exception as error:
-                    logging.exception("Problem filmu %s", ident)
-                    if request["mode"] != "public_sync":
-                        for item in self.store.items(ident):
-                            if item["review"] == "approved" and item["publication"] != "verified":
-                                self.store.error(ident, item["kind"], item["lang"], str(error))
-                    self.store.session(message="Film wymaga sprawdzenia: " + str(error)[:1000])
+                    self.record_video_error(request, ident, error)
                 self.store.session(cursor=index + 1)
         remaining = len(ids) - self.store.session()["cursor"]
         self.store.session(message=f"Sesja zakończona. Pozostało {remaining} filmów w zapisanym zakresie. Zmiany widoku obowiązują od następnego Start.")

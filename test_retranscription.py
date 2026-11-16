@@ -24,6 +24,12 @@ IDENT = "abcdefghij0"
 SRT = "1\n00:00:01,000 --> 00:00:02,000\nOld text\n"
 
 
+def enqueue_retry(case):
+    case.store.request_retranscription(case.job["id"], case.request)
+    case.store.start("youtube", [case.job["id"]], order_ids=[case.job["id"]], scope_mode="selected")
+    return case.store.claim()
+
+
 class RetryCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -57,11 +63,6 @@ class RetryCase(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
-
-    def enqueue(self):
-        self.store.request_retranscription(self.job["id"], self.request)
-        self.store.start("youtube", [self.job["id"]], order_ids=[self.job["id"]], scope_mode="selected")
-        return self.store.claim()
 
     def worker_fakes(self, *, infer=None):
         def decode(source, work, *_args):
@@ -103,7 +104,7 @@ class RequestTests(RetryCase):
     def test_request_requeues_only_explicit_recording(self):
         self.store.add_many([{"identity": "yt:abcdefghij1", "kind": "youtube", "title": "Other", "source": "other", "status": "done"}])
         other = self.store.jobs()[1]
-        job = self.enqueue()
+        job = enqueue_retry(self)
         self.assertEqual(pending_request(job), self.request)
         self.assertEqual(self.store.get(other["id"]), other)
         self.assertEqual((self.folder / "gotowe.json").read_bytes(), self.old_manifest)
@@ -174,7 +175,7 @@ class ExecutionTests(RetryCase):
     def test_new_asr_versions_outputs_preserves_audio_and_invalidates_only_captions(self):
         checked, asr, download, separate = self.worker_fakes()
         title = self.loc.item(IDENT, "title", "pl")
-        job = self.enqueue()
+        job = enqueue_retry(self)
         worker = Worker(self.root)
         config = worker.config
         worker.process(job)
@@ -204,7 +205,7 @@ class ExecutionTests(RetryCase):
 
     def test_failed_asr_preserves_current_outputs_and_caption_approvals(self):
         self.worker_fakes(infer=RuntimeError("ASR failed"))
-        job = self.enqueue()
+        job = enqueue_retry(self)
         captions = self.loc.items(IDENT)
         with self.assertLogs(level="ERROR"):
             Worker(self.root).process_one(job)
@@ -216,10 +217,11 @@ class ExecutionTests(RetryCase):
 
     def test_crash_after_export_resumes_finalization_without_repeating_asr(self):
         _, asr, _, _ = self.worker_fakes()
-        job = self.enqueue()
+        job = enqueue_retry(self)
+        worker = Worker(self.root)
         with patch("batch.worker.invalidate_captions", side_effect=OSError("simulated crash")):
             with self.assertRaises(OSError):
-                Worker(self.root).process(job)
+                worker.process(job)
         self.assertEqual(self.store.get(job["id"])["status"], "running")
         self.store.recover()
         recovered = self.store.claim()
@@ -229,19 +231,19 @@ class ExecutionTests(RetryCase):
 
     def test_completed_retry_is_not_repeated_by_next_normal_session(self):
         _, asr, _, _ = self.worker_fakes()
-        Worker(self.root).process(self.enqueue())
+        Worker(self.root).process(enqueue_retry(self))
         self.store.start("youtube")
         self.assertIsNone(self.store.claim())
         self.assertEqual(asr.call_count, 1)
 
     def test_same_retry_resumes_checkpoints_but_new_request_gets_fresh_directory(self):
         self.worker_fakes()
-        job = self.enqueue()
+        job = enqueue_retry(self)
         worker = Worker(self.root)
         worker.process(job)
         first = self.folder / ("ponow-" + self.request["id"][:12])
         self.request = new_request(language="en")
-        Worker(self.root).process(self.enqueue())
+        Worker(self.root).process(enqueue_retry(self))
         second = self.folder / ("ponow-" + self.request["id"][:12])
         self.assertNotEqual(first, second)
         self.assertTrue(first.is_dir() and second.is_dir())
@@ -250,7 +252,7 @@ class ExecutionTests(RetryCase):
 class CaptionRetryTests(RetryCase):
     def test_editor_cannot_save_old_captions_while_new_asr_is_queued(self):
         revision = self.loc.item(IDENT, "captions", "pl")["revision"]
-        self.enqueue()
+        enqueue_retry(self)
         with self.assertRaisesRegex(ValueError, "Trwa ponowna transkrypcja"):
             save_captions(self.loc, IDENT, "pl", SRT, expected_revision=revision)
         self.assertEqual(self.loc.item(IDENT, "captions", "pl")["value"], SRT)

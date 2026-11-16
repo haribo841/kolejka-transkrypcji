@@ -163,7 +163,9 @@ def session_cookies(values, node=None):
         jar = file_cookies(values["cookie_file"])
     else:
         try:
-            original = extract_cookies_from_browser(values["browser"], profile=values["profile"] or None,
+            browser_name = str(values["browser"])
+            profile = str(values["profile"]) or None
+            original = extract_cookies_from_browser(browser_name, profile=profile,
                                                     logger=QuietLogger())
             jar = YoutubeDLCookieJar()
             for cookie in original:

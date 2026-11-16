@@ -20,6 +20,7 @@ from .prepare import child
 from .store import LocalizationStore, metadata_source
 from .translation import REVISION, ready
 
+ENABLED_STATE = "!disabled"
 STEPS = ("Klient Google OAuth", "Połączenie konta", "Wybór kanału", "Środowisko tłumaczeń", "Model lokalny", "Próba tłumaczenia", "Pobranie danych YouTube")
 
 
@@ -75,8 +76,8 @@ class LocalizationWizard:
         self.title.set(f"Krok {self.step + 1} z {len(STEPS)}: {STEPS[self.step]}")
         self.message.set("")
         self.complete = False
-        self.back.state(["disabled"] if self.step == 0 else ["!disabled"])
-        self.skip.state(["!disabled"] if self.step < 3 else ["disabled"])
+        self.back.state(["disabled"] if self.step == 0 else [ENABLED_STATE])
+        self.skip.state([ENABLED_STATE] if self.step < 3 else ["disabled"])
         hints = [
             "Utwórz projekt w Google Cloud, włącz YouTube Data API v3 i skonfiguruj ekran zgody. Dodaj swoje konto jako użytkownika testowego. Utwórz klienta OAuth typu Desktop app i pobierz JSON. To połączenie służy publikacji; cookies do pobierania audio są ustawiane osobno.",
             "Kliknij Połącz konto. W przeglądarce wybierz konto i udziel dostępu do YouTube. Token odświeżania zostanie zapisany w magazynie poświadczeń Windows. Przy wygaśnięciu uprawnień wróć do tego kroku.",
@@ -96,69 +97,78 @@ class LocalizationWizard:
         self.action_button = ttk.Button(self.body, text=label, command=action)
         self.action_button.pack(anchor="w", pady=4)
         self.cancel_button = None
-        if self.step == 0:
-            ttk.Button(self.body, text="Wybierz pobrany JSON klienta Desktop", command=self.choose_client).pack(anchor="w", pady=4)
-            self.complete = client_path(self.app.root).is_file()
-        if self.step == 1:
-            self.cancel_button = ttk.Button(self.body, text="Anuluj oczekiwanie na logowanie", command=self.cancel_login)
-            self.cancel_button.pack(anchor="w", pady=4)
-            try:
-                client = client_settings(client_path(self.app.root))
-                WindowsVault(self.app.root).read(client["client_id"])
-                self.complete = True
-                self.message.set("Poświadczenie jest zapisane. Możesz przejść dalej albo ponownie połączyć konto.")
-            except (AuthError, OSError):
-                self.complete = False
-        if self.step == 2:
-            self.channel = tk.StringVar(master=self.dialog)
-            self.channel_combo = ttk.Combobox(self.body, state="readonly", textvariable=self.channel, width=80)
-            self.channel_combo.pack(fill="x", pady=8)
-            self.channel_combo.bind("<<ComboboxSelected>>", lambda _: self.channel_selected())
-            saved = options(self.app.root)
-            if saved["channel_id"]:
-                self.show_channels([{"id": saved["channel_id"], "snippet": {"title": saved.get("channel_name", saved["channel_id"])}}])
-            ttk.Label(self.body, text="Dzienny budżet aplikacji w jednostkach API (maks. 10000):").pack(anchor="w", pady=(12, 3))
-            self.budget = tk.StringVar(master=self.dialog, value=str(saved["budget"]))
-            ttk.Spinbox(self.body, from_=1, to=10000, increment=500, textvariable=self.budget, width=12).pack(anchor="w")
-        if self.step == 3:
-            self.complete = Path(options(self.app.root)["translation_python"]).is_file()
-        if self.step == 4:
-            try:
-                ready(self.app.root)
-                self.complete = True
-                self.message.set("Model obecny. Następny krok sprawdzi działanie.")
-            except RuntimeError:
-                self.message.set(read_json(self.app.root / "lokalizacje-model.json", {}).get("message", "Model wymaga pobrania."))
-        if self.step == 5:
-            trial = read_json(self.app.root / "lokalizacje" / "proba" / "passed.json", {})
-            try:
-                _path, manifest = ready(self.app.root)
-                self.complete = bool(trial.get("passed") and trial.get("model") == manifest)
-                if self.complete:
-                    self.message.set("Próba aktualnego modelu zaliczona: " + trial.get("at", "") + ". Możesz zakończyć albo powtórzyć próbę.")
-            except RuntimeError:
-                self.complete = False
-        if self.step == 6:
-            self.metadata_preview = tk.Text(self.body, height=9, wrap="word")
-            self.metadata_preview.pack(fill="both", expand=True, pady=6)
-            try:
-                video = self.sample_video()
-                self.show_metadata(video)
-            except ValueError as error:
-                self.message.set(str(error))
+        renderers = (self.draw_client, self.draw_account, self.draw_channel, self.draw_environment, self.draw_model, self.draw_trial, self.draw_metadata)
+        renderers[self.step]()
         self.update_navigation()
+
+    def draw_client(self):
+        ttk.Button(self.body, text="Wybierz pobrany JSON klienta Desktop", command=self.choose_client).pack(anchor="w", pady=4)
+        self.complete = client_path(self.app.root).is_file()
+
+    def draw_account(self):
+        self.cancel_button = ttk.Button(self.body, text="Anuluj oczekiwanie na logowanie", command=self.cancel_login)
+        self.cancel_button.pack(anchor="w", pady=4)
+        try:
+            client = client_settings(client_path(self.app.root))
+            WindowsVault(self.app.root).read(client["client_id"])
+            self.complete = True
+            self.message.set("Poświadczenie jest zapisane. Możesz przejść dalej albo ponownie połączyć konto.")
+        except (AuthError, OSError):
+            self.complete = False
+
+    def draw_channel(self):
+        self.channel = tk.StringVar(master=self.dialog)
+        self.channel_combo = ttk.Combobox(self.body, state="readonly", textvariable=self.channel, width=80)
+        self.channel_combo.pack(fill="x", pady=8)
+        self.channel_combo.bind("<<ComboboxSelected>>", lambda _: self.channel_selected())
+        saved = options(self.app.root)
+        if saved["channel_id"]:
+            self.show_channels([{"id": saved["channel_id"], "snippet": {"title": saved.get("channel_name", saved["channel_id"])}}])
+        ttk.Label(self.body, text="Dzienny budżet aplikacji w jednostkach API (maks. 10000):").pack(anchor="w", pady=(12, 3))
+        self.budget = tk.StringVar(master=self.dialog, value=str(saved["budget"]))
+        ttk.Spinbox(self.body, from_=1, to=10000, increment=500, textvariable=self.budget, width=12).pack(anchor="w")
+
+    def draw_environment(self):
+        self.complete = Path(options(self.app.root)["translation_python"]).is_file()
+
+    def draw_model(self):
+        try:
+            ready(self.app.root)
+            self.complete = True
+            self.message.set("Model obecny. Następny krok sprawdzi działanie.")
+        except RuntimeError:
+            self.message.set(read_json(self.app.root / "lokalizacje-model.json", {}).get("message", "Model wymaga pobrania."))
+
+    def draw_trial(self):
+        trial = read_json(self.app.root / "lokalizacje" / "proba" / "passed.json", {})
+        try:
+            _path, manifest = ready(self.app.root)
+            self.complete = bool(trial.get("passed") and trial.get("model") == manifest)
+            if self.complete:
+                self.message.set("Próba aktualnego modelu zaliczona: " + trial.get("at", "") + ". Możesz zakończyć albo powtórzyć próbę.")
+        except RuntimeError:
+            self.complete = False
+
+    def draw_metadata(self):
+        self.metadata_preview = tk.Text(self.body, height=9, wrap="word")
+        self.metadata_preview.pack(fill="both", expand=True, pady=6)
+        try:
+            video = self.sample_video()
+            self.show_metadata(video)
+        except ValueError as error:
+            self.message.set(str(error))
 
     def update_navigation(self):
         final_text = "Zakończ konfigurację" if connection_status(self.app.root).ready else "Zakończ tryb lokalny (bez publikacji)"
         self.next.configure(text=final_text if self.step == len(STEPS) - 1 else "Dalej")
-        self.next.state(["!disabled"] if self.complete and not self.busy else ["disabled"])
-        self.back.state(["disabled"] if self.busy or self.step == 0 else ["!disabled"])
-        self.skip.state(["disabled"] if self.busy or self.step >= 3 else ["!disabled"])
+        self.next.state([ENABLED_STATE] if self.complete and not self.busy else ["disabled"])
+        self.back.state(["disabled"] if self.busy or self.step == 0 else [ENABLED_STATE])
+        self.skip.state(["disabled"] if self.busy or self.step >= 3 else [ENABLED_STATE])
         logging_in = self.busy and self.operation == "connect"
         self.action_button.configure(text="Ponów logowanie" if logging_in else self.action_label)
-        self.action_button.state(["disabled"] if self.busy and not logging_in else ["!disabled"])
+        self.action_button.state(["disabled"] if self.busy and not logging_in else [ENABLED_STATE])
         if self.cancel_button is not None:
-            self.cancel_button.state(["!disabled"] if logging_in else ["disabled"])
+            self.cancel_button.state([ENABLED_STATE] if logging_in else ["disabled"])
 
     def perform(self, function, callback=None, *, operation=""):
         if self.busy:

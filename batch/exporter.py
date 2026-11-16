@@ -70,20 +70,10 @@ def recovered_notice(report):
             "Przyczyna: " + recovery.get("message", "Uszkodzone źródło audio.") + "\n\n")
 
 
-def export(folder, report, execution_signature, *, complete=True):
-    folder = Path(folder)
-    assert_output_owner(folder, report["identity"])
-    duration = report["duration"] if complete else report["processed_until"]
+def render_transcript(report, notice, omit_labels):
     segments = report["segments"]
-    validate_segments(segments, duration)
-    report["complete"] = complete
-    labels = {segment["speaker"] for segment in segments}
-    automatic = (report.get("settings") or {}).get(AUTO_SPEAKER_SETTING, True)
-    omit_labels = bool(automatic and single_speaker_labels(labels))
-    report["text_export"] = {"omit_single_speaker_labels": bool(automatic), "speaker_labels_omitted": omit_labels}
     lines = [f"{report['title']}\n"]
     srt, vtt = [], ["WEBVTT\n\n"]
-    notice = recovered_notice(report) if complete else partial_notice(report, duration)
     if notice:
         lines.append(notice)
         vtt.append("NOTE " + " ".join(notice.replace("-->", "→").splitlines()) + "\n\n")
@@ -102,8 +92,22 @@ def export(folder, report, execution_signature, *, complete=True):
         vtt.append(f"{timestamp(start)} --> {timestamp(end)}\n{prefix}{escaped}\n\n")
     if not segments:
         lines.append("[Brak rozpoznanych wypowiedzi]\n")
-    content = dict(zip(EXTENSIONS, ("".join(lines), "".join(srt), "".join(vtt),
-                                  json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))))
+    return "".join(lines), "".join(srt), "".join(vtt)
+
+
+def export(folder, report, execution_signature, *, complete=True):
+    folder = Path(folder)
+    assert_output_owner(folder, report["identity"])
+    duration = report["duration"] if complete else report["processed_until"]
+    validate_segments(report["segments"], duration)
+    report["complete"] = complete
+    labels = {segment["speaker"] for segment in report["segments"]}
+    automatic = (report.get("settings") or {}).get(AUTO_SPEAKER_SETTING, True)
+    omit_labels = bool(automatic and single_speaker_labels(labels))
+    report["text_export"] = {"omit_single_speaker_labels": bool(automatic), "speaker_labels_omitted": omit_labels}
+    notice = recovered_notice(report) if complete else partial_notice(report, duration)
+    text_outputs = render_transcript(report, notice, omit_labels)
+    content = dict(zip(EXTENSIONS, (*text_outputs, json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))))
     stem = output_stem(report["title"], report["identity"]) + ("" if complete else "_czesciowa")
     paths = unused_paths(folder, stem, identity=report["identity"])
     for extension, path in paths.items():

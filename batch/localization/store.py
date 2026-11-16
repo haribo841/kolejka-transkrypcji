@@ -216,7 +216,7 @@ class LocalizationStore:
             db.execute("UPDATE ytl_items SET error=?,updated=? WHERE video_id=? AND kind=? AND lang=?", (message[:1500], now(), ident, kind, lang))
 
     def session(self, **values):
-        if not values.keys() <= SESSION_UPDATES.keys():
+        if values.keys() - SESSION_UPDATES.keys():
             raise ValueError("Niepoprawne ustawienia sesji lokalizacji.")
         with self.base.connect() as db:
             for key, value in values.items():

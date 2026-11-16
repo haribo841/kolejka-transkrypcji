@@ -22,6 +22,7 @@ from .store import LocalizationStore, metadata_source
 from .worker import launch, recover_session
 
 COLUMNS = ("date", "title", "meta_pl", "meta_en", "cap_pl", "cap_en", "background", "audio_pl", "audio_en")
+ENABLED_STATE = "!disabled"
 HEADINGS = ("Data", "Nagranie", "Tytuł/opis PL", "Tytuł/opis EN", "Napisy PL", "Napisy EN", "Bez głosów", "Audio PL", "Audio EN")
 
 
@@ -221,13 +222,13 @@ class LocalizationTab:
             return
         self.controls_state = state
         for key in ("prepare", "publish", "resume"):
-            self.controls[key].state(["disabled"] if busy else ["!disabled"])
+            self.controls[key].state(["disabled"] if busy else [ENABLED_STATE])
         if not self.google_ready:
             self.controls["publish"].state(["disabled"])
         self.sync_button.configure(text="Odświeżanie…" if refreshing else "Odśwież z YouTube")
         self.sync_button.state(["pressed"] if refreshing else ["!pressed"])
-        self.sync_button.state(["disabled"] if busy else ["!disabled"])
-        self.controls["stop"].state(["!disabled"] if self.worker_busy else ["disabled"])
+        self.sync_button.state(["disabled"] if busy else [ENABLED_STATE])
+        self.controls["stop"].state([ENABLED_STATE] if self.worker_busy else ["disabled"])
 
     def snapshot(self):
         if self.store is None:
@@ -280,21 +281,24 @@ class LocalizationTab:
                 callback, result, error = self.events.get_nowait()
             except queue.Empty:
                 break
-            background, action = self.pending_background, self.pending_action
-            self.pending, self.pending_background, self.pending_action = False, False, ""
-            if error:
-                self.note.set(error)
-                if not background:
-                    messagebox.showerror("Lokalizacje YouTube", error, parent=self.parent)
-            else:
-                if action in {"sync", "prepare", "publish", "resume"}:
-                    self.worker_busy = True
-                    if action != "resume":
-                        self.worker_mode = action
-                    self.next_snapshot = 0
-                if callback:
-                    callback(result)
+            self.complete_action(callback, result, error)
         self.update_action_controls()
+
+    def complete_action(self, callback, result, error):
+        background, action = self.pending_background, self.pending_action
+        self.pending, self.pending_background, self.pending_action = False, False, ""
+        if error:
+            self.note.set(error)
+            if not background:
+                messagebox.showerror("Lokalizacje YouTube", error, parent=self.parent)
+            return
+        if action in {"sync", "prepare", "publish", "resume"}:
+            self.worker_busy = True
+            if action != "resume":
+                self.worker_mode = action
+            self.next_snapshot = 0
+        if callback:
+            callback(result)
 
     def start_next_action(self):
         if self.queued_action is not None:
@@ -340,8 +344,10 @@ class LocalizationTab:
             self.sort_column, self.sort_direction = column, "asc"
         else:
             self.sort_direction = {None: "asc", "asc": "desc", "desc": None}[self.sort_direction]
+        arrow = {"asc": " ▲", "desc": " ▼"}.get(self.sort_direction, "")
         for key, title in zip(COLUMNS, HEADINGS):
-            self.tree.heading(key, text=title + (" ▲" if self.sort_direction == "asc" else " ▼") if key == column and self.sort_direction else title)
+            suffix = arrow if key == column else ""
+            self.tree.heading(key, text=title + suffix)
         self.render(reset=True)
 
     def selection_changed(self, _event=None):
@@ -372,20 +378,30 @@ class LocalizationTab:
         if not prepared:
             status += " Wersje PL/EN pojawią się po Przygotuj zaznaczone."
         self.original.set(f"{source.get('title', video['title'])} | {status} {video['conflict']} {video.get('metadata_error', '')} " + " ".join(errors)[:600])
-        for lang, (title, description) in self.metadata.items():
-            for kind, current in (("title", title.get()), ("description", description.get("1.0", "end-1c"))):
-                key = (kind, lang)
-                baseline = self.field_baselines.get(key)
-                if preserve_edits and baseline and current != baseline["value"]:
-                    continue
-                item = data[key]
-                if item["value"] != current:
-                    if kind == "title":
-                        title.set(item["value"])
-                    else:
-                        description.delete("1.0", "end")
-                        description.insert("1.0", item["value"])
-                self.field_baselines[key] = {"value": item["value"], "hash": item["content_hash"]}
+        for lang, widgets in self.metadata.items():
+            self.load_language(lang, widgets, data, preserve_edits)
+
+    def load_language(self, lang, widgets, data, preserve_edits):
+        title, description = widgets
+        for kind, current in (("title", title.get()), ("description", description.get("1.0", "end-1c"))):
+            key = (kind, lang)
+            baseline = self.field_baselines.get(key)
+            if preserve_edits and baseline and current != baseline["value"]:
+                continue
+            item = data[key]
+            if item["value"] != current:
+                if kind == "title":
+                    title.set(item["value"])
+                else:
+                    description.delete("1.0", "end")
+                    description.insert("1.0", item["value"])
+            self.field_baselines[key] = {"value": item["value"], "hash": item["content_hash"]}
+
+    def confirm_field_change(self, kind, lang, old, baseline, text, confirm_conflict):
+        if old["content_hash"] == baseline["hash"] or text == old["value"]:
+            return True
+        self.note.set("Pole " + kind + " " + lang.upper() + " zmieniło się w tle. Twoja korekta pozostaje w oknie. Kliknij Zapisz teksty, aby zdecydować o zastąpieniu nowszej wersji.")
+        return confirm_conflict and messagebox.askyesno("Pole zmienione w tle", "Zastąpić nowszą zapisaną wersję pola " + kind + " " + lang.upper() + " Twoją korektą z okna? Poprzednia wersja pozostanie w historii.", parent=self.parent)
 
     def save_fields(self, *, confirm_conflict=False):
         if not self.loaded:
@@ -397,10 +413,8 @@ class LocalizationTab:
                 if baseline is None or text == baseline["value"]:
                     continue
                 old = self.store.item(self.loaded, kind, lang)
-                if old["content_hash"] != baseline["hash"] and text != old["value"]:
-                    self.note.set("Pole " + kind + " " + lang.upper() + " zmieniło się w tle. Twoja korekta pozostaje w oknie. Kliknij Zapisz teksty, aby zdecydować o zastąpieniu nowszej wersji.")
-                    if not confirm_conflict or not messagebox.askyesno("Pole zmienione w tle", "Zastąpić nowszą zapisaną wersję pola " + kind + " " + lang.upper() + " Twoją korektą z okna? Poprzednia wersja pozostanie w historii.", parent=self.parent):
-                        return False
+                if not self.confirm_field_change(kind, lang, old, baseline, text, confirm_conflict):
+                    return False
                 changes.append((kind, lang, text, old))
         for kind, lang, text, old in changes:
             item = self.store.save_item(self.loaded, kind, lang, text, old["source_hash"])

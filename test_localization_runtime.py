@@ -17,6 +17,30 @@ from test_localization import IDENT, LocalizationCase
 
 
 class SessionTests(LocalizationCase):
+    def test_model_preflight_failure_releases_both_worker_locks_without_advancing(self):
+        self.configure_session(ids=[IDENT])
+        prepare = Mock()
+        with patch("batch.localization.translation.ready", side_effect=ResourceError("Model unavailable")), self.assertLogs(level="ERROR"):
+            Runner(self.store, prepare=prepare).run()
+        prepare.assert_not_called()
+        self.assertFalse(WorkerLock.busy(self.root))
+        self.assertFalse(WorkerLock.busy(self.root / "lokalizacje"))
+        self.assertEqual((self.store.session()["state"], self.store.session()["cursor"]), ("paused", 0))
+
+    def test_session_lock_is_released_if_final_database_update_fails(self):
+        self.configure_session(ids=[IDENT])
+        original = self.store.session
+        def session(**values):
+            if values.get("state") == "idle":
+                raise RuntimeError("Final database update failed")
+            return original(**values)
+        runner = Runner(self.store, prepare=Mock(return_value=[]))
+        with patch.object(self.store, "session", side_effect=session), patch("batch.localization.translation.ready"):
+            with self.assertRaises(RuntimeError):
+                runner.run()
+        self.assertFalse(WorkerLock.busy(self.root))
+        self.assertFalse(WorkerLock.busy(self.root / "lokalizacje"))
+
     def test_successful_selected_refresh_has_no_remaining_videos(self):
         self.configure_session(mode="sync", ids=[IDENT])
         with patch("batch.localization.worker.sync_catalog") as sync:
@@ -306,8 +330,9 @@ class HttpTests(LocalizationCase):
         auth = Mock()
         auth.token.return_value = "test-token"
         from batch.localization.api import ApiError
+        api = YouTube(self.store, auth=auth, transport=transport)
         with self.assertRaises(ApiError):
-            YouTube(self.store, auth=auth, transport=transport).upload_caption({}, "captions")
+            api.upload_caption({}, "captions")
         self.assertEqual(transport.request.call_count, 1)
 
 

@@ -11,6 +11,7 @@ from .auth import AuthError, Authorization
 
 BASE = "https://www.googleapis.com/youtube/v3/"
 UPLOAD = "https://www.googleapis.com/upload/youtube/v3/captions"
+BEARER_PREFIX = "Bearer "
 
 
 class QuotaError(RuntimeError):
@@ -81,7 +82,7 @@ class YouTube:
             raise ValueError("Nieobsługiwany zasób YouTube.")
         token = self.auth.token()
         self.store.reserve_quota(quota_day(), cost, self.budget)
-        headers = {"Authorization": "Bearer " + token}
+        headers = {"Authorization": BEARER_PREFIX + token}
         if etag:
             headers["If-Match"] = etag
         try:
@@ -122,7 +123,7 @@ class YouTube:
         body = {"snippet": metadata}
         if caption_id:
             body["id"] = caption_id
-        headers = {"Authorization": "Bearer " + token, "X-Upload-Content-Type": "application/octet-stream"}
+        headers = {"Authorization": BEARER_PREFIX + token, "X-Upload-Content-Type": "application/octet-stream"}
         try:
             response = self.transport.request("PUT" if caption_id else "POST", UPLOAD,
                 params={"part": "snippet", "uploadType": "resumable"}, json=body, headers=headers, timeout=(10, 90), allow_redirects=False)
@@ -132,7 +133,7 @@ class YouTube:
             if parsed.scheme != "https" or parsed.hostname != "www.googleapis.com" or parsed.username or parsed.password or parsed.port not in {None, 443} or not parsed.path.startswith("/upload/youtube/"):
                 raise ApiError("Google nie zwrócił poprawnej sesji wysyłania napisów.")
             response = self.transport.request("PUT", location, data=text.encode("utf-8"),
-                headers={"Authorization": "Bearer " + token, "Content-Type": "application/octet-stream"}, timeout=(10, 90), allow_redirects=False)
+                headers={"Authorization": BEARER_PREFIX + token, "Content-Type": "application/octet-stream"}, timeout=(10, 90), allow_redirects=False)
             checked_response(response)
             return response.json()
         except (requests.RequestException, ValueError) as error:
@@ -142,40 +143,48 @@ class YouTube:
         return self.request("PUT", "videos", cost=50, params={"part": "snippet,localizations"}, body=body, etag=etag)
 
 
+def channel_uploads(store, api, progress):
+    channel_id = options(store.root)["channel_id"]
+    channel = next((c for c in api.channels() if c["id"] == channel_id), None)
+    if channel is None:
+        raise AuthError("Wybierz kanał w kreatorze publikacji.")
+    playlist = channel["contentDetails"]["relatedPlaylists"]["uploads"]
+    selected, token = [], ""
+    progress("Zbieranie katalogu filmów wybranego kanału…")
+    while True:
+        page = api.request("GET", "playlistItems", params={"part": "contentDetails", "playlistId": playlist, "maxResults": 50, "pageToken": token})
+        selected.extend(item["contentDetails"]["videoId"] for item in page.get("items", []))
+        progress(f"Znaleziono {len(selected)} filmów w katalogu kanału")
+        token = page.get("nextPageToken", "")
+        if not token:
+            return selected
+
+
+def import_catalog_batch(store, data):
+    rows = []
+    for item in data:
+        if item["snippet"]["channelId"] != options(store.root)["channel_id"]:
+            raise AuthError("W odpowiedzi jest film innego kanału. Synchronizacja przerwana.")
+        snippet = item["snippet"]
+        rows.append({"identity": "yt:" + item["id"], "kind": "youtube", "title": snippet["title"],
+                     "source": "https://www.youtube.com/watch?v=" + item["id"], "date": snippet.get("publishedAt", ""),
+                     "visibility": item.get("status", {}).get("privacyStatus", ""), "meta": {"origin": "youtube-api"}})
+    store.base.add_many(rows)
+    store.bootstrap()
+    for item in data:
+        store.snapshot(item)
+
+
 def sync_catalog(store, api, ids, progress):
     """Full upload-list refresh is cheap; caption details are fetched only for selection."""
     selected = list(ids)
     if not selected:
-        channel_id = options(store.root)["channel_id"]
-        channel = next((c for c in api.channels() if c["id"] == channel_id), None)
-        if channel is None:
-            raise AuthError("Wybierz kanał w kreatorze publikacji.")
-        playlist = channel["contentDetails"]["relatedPlaylists"]["uploads"]
-        token = ""
-        progress("Zbieranie katalogu filmów wybranego kanału…")
-        while True:
-            page = api.request("GET", "playlistItems", params={"part": "contentDetails", "playlistId": playlist, "maxResults": 50, "pageToken": token})
-            selected.extend(item["contentDetails"]["videoId"] for item in page.get("items", []))
-            progress(f"Znaleziono {len(selected)} filmów w katalogu kanału")
-            token = page.get("nextPageToken", "")
-            if not token:
-                break
+        selected = channel_uploads(store, api, progress)
     selected = list(dict.fromkeys(selected))
     for offset in range(0, len(selected), 50):
         progress(f"Pobieranie metadanych {offset + 1}-{min(offset + 50, len(selected))} / {len(selected)}")
         data = api.videos(selected[offset:offset + 50])
-        rows = []
-        for item in data:
-            if item["snippet"]["channelId"] != options(store.root)["channel_id"]:
-                raise AuthError("W odpowiedzi jest film innego kanału. Synchronizacja przerwana.")
-            snippet = item["snippet"]
-            rows.append({"identity": "yt:" + item["id"], "kind": "youtube", "title": snippet["title"],
-                         "source": "https://www.youtube.com/watch?v=" + item["id"], "date": snippet.get("publishedAt", ""),
-                         "visibility": item.get("status", {}).get("privacyStatus", ""), "meta": {"origin": "youtube-api"}})
-        store.base.add_many(rows)
-        store.bootstrap()
-        for item in data:
-            store.snapshot(item)
+        import_catalog_batch(store, data)
         progress(f"Odświeżono {min(offset + 50, len(selected))} / {len(selected)} filmów")
     if ids:
         from ..common import atomic_json
