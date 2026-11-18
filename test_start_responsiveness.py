@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 from batch.common import WorkerLock, atomic_json, defaults
 from batch.gui import Window
+from batch.store import Store
 from test_support import wait_for_start
 
 
@@ -26,6 +27,14 @@ class StartResponsivenessTests(unittest.TestCase):
         config = defaults()
         config.update(uvr_enabled=False, diarization=False)
         atomic_json(self.root / "ustawienia.json", config)
+        # Seed before Window starts background readers and localization setup.
+        Store(self.root).add_many([
+            {"identity": "local:" + "a" * 64, "kind": "local", "title": "Alpha lecture",
+             "source": str(self.root / "alpha.mkv"), "date": "2020-01-01", "duration": 20},
+            {"identity": "local:" + "b" * 64, "kind": "local", "title": "Beta lecture",
+             "source": str(self.root / "beta.avi"), "date": "2020-01-02", "duration": 10},
+            {"identity": "local:" + "c" * 64, "kind": "local", "title": "Other recording",
+             "source": str(self.root / "other.mp4"), "date": "2020-01-03", "duration": 30}])
         self.entered, self.release = threading.Event(), threading.Event()
         self.check_thread_ids = []
         self.patches = [patch("batch.gui.QueueWindow.request_readiness"),
@@ -39,13 +48,6 @@ class StartResponsivenessTests(unittest.TestCase):
         self.tk.withdraw()
         self.app = Window(self.root, tk_root=self.tk)
         self.app.readiness = READY
-        self.app.store.add_many([
-            {"identity": "local:" + "a" * 64, "kind": "local", "title": "Alpha lecture",
-             "source": str(self.root / "alpha.mkv"), "date": "2020-01-01", "duration": 20},
-            {"identity": "local:" + "b" * 64, "kind": "local", "title": "Beta lecture",
-             "source": str(self.root / "beta.avi"), "date": "2020-01-02", "duration": 10},
-            {"identity": "local:" + "c" * 64, "kind": "local", "title": "Other recording",
-             "source": str(self.root / "other.mp4"), "date": "2020-01-03", "duration": 30}])
         self.app.jobs = {job["id"]: job for job in self.app.store.jobs()}
         self.ids = [job["id"] for job in self.app.store.jobs()]
         self.app.local_tab.render()

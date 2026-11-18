@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import io
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import tempfile
 import threading
@@ -12,7 +14,7 @@ from unittest.mock import MagicMock, patch
 from batch.common import WorkerLock, atomic_json, defaults, digest
 from batch.media import MediaError, classify_error, download, wait_before_youtube, youtube_options
 from batch.store import Store
-from batch.youtube_access import (DEFAULTS, SETTINGS_FILE, SessionError, file_cookies,
+from batch.youtube_access import (DEFAULTS, SETTINGS_FILE, QuietLogger, SessionError, file_cookies,
     preferences, save_preferences, session_cookies, validate_preferences, youtube_client)
 from batch.youtube_dialog import probe_process
 from batch.youtube_probe import check_access
@@ -36,6 +38,38 @@ class SessionTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_cookie_logger_matches_the_library_contract_and_never_prints_sensitive_data(self):
+        from yt_dlp.cookies import YDLLogger, _create_progress_bar
+        logger = QuietLogger()
+        self.assertIsInstance(logger, YDLLogger)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            logger.debug(COOKIE_VALUE)
+            logger.info(COOKIE_VALUE)
+            logger.warning(COOKIE_VALUE, only_once=True)
+            logger.error(COOKIE_VALUE)
+            with _create_progress_bar(logger) as progress:
+                progress.print(COOKIE_VALUE)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_browser_extractor_receives_a_compatible_silent_logger(self):
+        from yt_dlp.cookies import YDLLogger, _create_progress_bar
+        def extract(profile, container, logger):
+            self.assertIsInstance(logger, YDLLogger)
+            self.assertEqual(profile, "offline-profile")
+            self.assertIsNone(container)
+            logger.warning(COOKIE_VALUE, only_once=True)
+            with _create_progress_bar(logger) as progress:
+                progress.print(COOKIE_VALUE)
+            return file_cookies(self.cookies)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch("yt_dlp.cookies._extract_firefox_cookies", side_effect=extract), redirect_stdout(stdout), redirect_stderr(stderr):
+            jar = session_cookies(dict(DEFAULTS, mode="browser", browser="firefox", profile="offline-profile"))
+        self.assertEqual([cookie.name for cookie in jar], ["SAPISID"])
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_default_never_reads_browser_or_file(self):
         with patch("yt_dlp.cookies.extract_cookies_from_browser") as browser, patch("batch.youtube_access.file_cookies") as file:

@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import time
 
+from yt_dlp.cookies import YDLLogger
+
 from .common import ResourceError, atomic_json, read_json, signature
 
 SETTINGS_FILE = "youtube-dostep.json"
@@ -21,7 +23,7 @@ class SessionError(ResourceError):
     pass
 
 
-class QuietLogger:
+class QuietLogger(YDLLogger):
     # Some browser-cookie errors include cookie rows. Do not pass them to logs.
     def debug(self, *_args, **_kwargs):
         pass
